@@ -1,5 +1,11 @@
 # Changelog
 
+## Ubuntu 24.04 documentation restructure
+- Replace legacy numbered guides with a modular docs/ setup sequence.
+- Add base Ubuntu, static PX4 Ethernet, MAVLink Anywhere, ROS 2 Jazzy and Micro XRCE-DDS instructions; separate recovered bench observations from new documentation.
+- Move RM520N guide without changing config or quality executables; retain quality and validation instructions.
+- Remove legacy camera, project-specific autostart, hotspot and GPIO modem reset documents and associated start_uav.sh from this branch (history retained).
+
 ## Quality v0.2.1
 - Synchronize repository documentation and acceptance checklist.
 - Add offline tests for burst loss and LTE/NR NSA parsing, plus no-service handling.

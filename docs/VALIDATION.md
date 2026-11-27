@@ -15,6 +15,20 @@ sudo ./config --check
 
 Record the kernel, board, modem firmware and USB driver. Offline tests cover ICMP parsing, duplicates, total loss, percentiles, adjacent RTT delta, burst loss, reference thresholds and LTE/NSA sample parsing. They do not validate real hardware or SA firmware layouts.
 
+## Flight-controller link and middleware (before optional networking)
+
+Use [02 PX4 Ethernet](02_PX4_ETHERNET.md), [03 MAVLink](03_MAVLINK.md), and [04 ROS 2/DDS](04_ROS2_DDS.md).
+
+| Case | Expected observation |
+|---|---|
+| Dedicated wired NIC | 192.168.0.2/24 to PX4 192.168.0.3/24; no default route on FC NIC |
+| MAVLink | PX4 UDP 14556 to companion 14600, bidirectional heartbeat/parameter read, GCS receives stream |
+| DDS | UDP 8888 session established, topic discovery and changing read-only data with matching px4_msgs/domain/QoS |
+| Concurrent operation | Both independent protocols remain functional without port collisions |
+| Reboot | Static Ethernet profile, router and Agent return automatically; verify data, not only service status |
+
+Historical Pi 5 session (2026-10-16): Ethernet ping 10/10, mean ~0.210 ms, bidirectional MAVLink and XRCE session/topic discovery were observed. Exact router and Agent package revisions, domain of that session, and current end-to-end reboot/continuous topic streaming are not established by the recovered evidence. The new written procedures must be bench-tested; do not claim they are a previously executed installer.
+
 ## 2. Configuration and watchdog
 
 Use sudo ./config from the local console only if installing or updating the installed CLI. Verify sudo ctuav-net status and sudo ctuav-net logs.

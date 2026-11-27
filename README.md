@@ -1,6 +1,32 @@
-# Companion Computer Setup — RM520N-GL
+# Companion Computer Setup — Ubuntu 24.04 LTS
 
-Interactive installer for Quectel RM520N-GL on Orange Pi 6 / Ubuntu 24.04 (ARM64). Other boards are not hardware-validated.
+A modular setup repository for embedded Linux companion computers (Raspberry Pi 5, Orange Pi 6 and compatible Ubuntu 24.04 systems) connecting to PX4 over Ethernet. Install the OS and flight-controller middleware independently of optional cellular, Wi-Fi and NetBird. This branch implements RM520N-GL ECM networking; other modem branches retain their own historical guides.
+
+## Setup order
+
+| Step | Guide |
+|---|---|
+| 01 | [Ubuntu 24.04 base system, SSH, hostname, NetworkManager](docs/01_UBUNTU_24_04.md) |
+| 02 | [Dedicated Pixhawk Ethernet and static IP](docs/02_PX4_ETHERNET.md) |
+| 03 | [MAVLink Anywhere, MAVLink routing and GCS](docs/03_MAVLINK.md) |
+| 04 | [ROS 2 Jazzy, px4_msgs and Micro XRCE-DDS Agent](docs/04_ROS2_DDS.md) |
+| 05 | [RM520N-GL ECM, automatic Hotspot/Station](docs/05_RM520N_GL.md) |
+| 06 | [NetBird remote access and service operations](docs/06_REMOTE_ACCESS.md) |
+| 07 | [Network quality benchmark](docs/NETWORK_QUALITY.md) |
+| 08 | [Bench validation checklist](docs/VALIDATION.md) |
+
+```text
+Pixhawk 192.168.0.3/24
+     | Ethernet (isolated FC subnet)
+     | MAVLink UDP 14556 -> 14600
+     | XRCE-DDS UDP -> 8888
+Companion 192.168.0.2/24
+     | mavlink-router / MAVLink Anywhere -> GCS UDP 14550
+     | MicroXRCEAgent -> ROS 2 Jazzy / px4_msgs (local DDS)
+     | Optional RM520N-GL ECM / USB Wi-Fi / NetBird
+```
+
+The IP addresses and port pair reflect earlier Pi 5 bench observations. Domain 42/local discovery is a configurable companion-local profile. No hardware-wide validation is implied. The base OS, MAVLink and DDS steps are documented commands, not actions performed by config; config installs only the RM520N networking stack. No camera-specific or project-specific autostart/legacy GPIO reset scripts are required.
 
 ## Repository layout and versions
 
@@ -9,14 +35,14 @@ Interactive installer for Quectel RM520N-GL on Orange Pi 6 / Ubuntu 24.04 (ARM64
 | [config](config) | Interactive installer v0.1.1; installs the ctuav-net CLI and watchdog |
 | [quality](quality) | Standalone quality tool v0.2.1; does not change network settings |
 | [quality_advanced.py](quality_advanced.py) | RF and controlled throughput support; keep alongside quality |
-| [Manual setup](2nd_dougle_4g_setup.md) | ECM, NetBird, Wi-Fi, recovery and historical benchmarks |
+| [Manual setup](docs/05_RM520N_GL.md) | ECM, NetBird, Wi-Fi, recovery and historical benchmarks |
 | [Network quality](docs/NETWORK_QUALITY.md) | Measurement commands, metrics and limitations |
 | [Validation checklist](docs/VALIDATION.md) | Bench acceptance and regression procedure |
 | [Changelog](CHANGELOG.md) | Installer and benchmark changes |
 
 For an already configured board, update quality with git pull --ff-only; no installer rerun or service restart is needed. Updating the installed ctuav-net executable is separate and requires rerunning config from a recovery-capable console.
 
-## Quick start
+## Optional RM520N networking installer
 
 Run from a local console (or independent recovery link), not through the Wi-Fi adapter that will be switched.
 
@@ -81,7 +107,7 @@ sudo nmcli con up uuid UUID
 
 To resume after reviewing configuration: sudo systemctl enable --now ctuav-network.service.
 
-For manual setup, measured 5G results, NetBird, driver troubleshooting and recovery, see [RM520N-GL detailed setup](2nd_dougle_4g_setup.md). The other legacy documents are retained for reference; do not run the legacy hotspot or 4G reset scripts together with this watchdog.
+For manual setup, measured 5G results, NetBird, driver troubleshooting and recovery, see [RM520N-GL detailed setup](docs/05_RM520N_GL.md). Legacy camera, application autostart and GPIO reset guides were removed from this branch; prior revisions remain available in Git history. Do not run old hotspot or reset services together with this watchdog.
 
 ## Network quality benchmark
 
@@ -127,6 +153,6 @@ Progress is printed every five seconds during ping. Invalid measurements report 
 
 ## Validation
 
-Version 0.1.1 is an initial installer implementation, not a hardware-qualified release. The earlier manual ECM/AP/STA configurations were tested on Orange Pi 6. On-device v0.1.0 validation confirmed ECM, existing Station profile reuse, Hotspot activation after installing dnsmasq-base, and active/enabled watchdog. Automated dependency installation in v0.1.1, automatic AT path, bidirectional switching, fallback AP, reboot and the new quality tool still require validation. Do not use it as a safety-critical control link.
+Network installer v0.1.1 is an initial installer implementation, not a hardware-qualified release. The earlier manual ECM/AP/STA configurations were tested on Orange Pi 6. On-device v0.1.0 validation confirmed ECM, existing Station profile reuse, Hotspot activation after installing dnsmasq-base, and active/enabled watchdog. Automated dependency installation in v0.1.1, automatic AT path, bidirectional switching, fallback AP, reboot and the new quality tool still require validation. Do not use it as a safety-critical control link.
 
 CLI workflow inspired by [MAVLink Anywhere](https://github.com/alireza787b/mavlink-anywhere); this is an independent implementation, not a dependency on that project.
