@@ -73,7 +73,7 @@ def parse_qeng(raw):
             if len(f) < 3:
                 continue
             f = f[2:]
-        if f[0] == "LTE" and len(f) >= 15:
+        if f[0] == "LTE" and len(f) >= 16:
             result.update(dict(zip(
                 ("lte_cell_id","lte_pci","lte_earfcn","lte_band"),
                 (f[4],f[5],f[6],f[7]))))

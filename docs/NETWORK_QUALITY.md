@@ -2,7 +2,7 @@
 
 ## Scope
 
-The executable quality is independent of config. It uses Linux iputils ping, iproute2 and Python 3 standard library. No modem commands, configuration changes or network restarts are performed. Root is required for rates above 5 Hz in this tool. Test on the bench, not in flight.
+The executable quality is independent of config. The default ICMP mode uses Linux iputils ping, iproute2 and Python 3 standard library. Optional RF uses python3-serial and read-only AT queries; optional load tests use iperf3. No network configuration changes or network restarts are performed. Root is required for rates above 5 Hz in this tool. Test on the bench, not in flight.
 
 ## Run
 
@@ -74,7 +74,7 @@ The default ICMP benchmark does not measure one-way delay, UDP application loss,
 The original manual benchmark used 5, 10, 20 and 50 Hz with 60-second nominal test windows. This script automates that method and adds per-packet analysis. The new implementation must be checked on the actual target hardware; do not confuse previous manual results with results produced by this tool.
 
 
-## Advanced benchmark v0.2.0
+## Advanced benchmark v0.2.x
 
 The optional --deep profile adds a second public Internet target (default 8.8.8.8), ICMP payloads 512/1200/1400 bytes and a 600-second soak (configurable --soak-duration 10..1800). The payload sweep allows fragmentation by default and is not PMTU discovery. All tests use the verified cellular route; high latency may be caused by remote ICMP handling as well as radio/network conditions.
 
@@ -96,4 +96,4 @@ Each load trial stores native iperf JSON, sender/receiver summaries, UDP loss an
 
 Reference: [ESnet iperf3 documentation](https://software.es.net/iperf/invoking.html). Load tests consume mobile data and require explicit --iperf-server; no external server is contacted automatically. No configuration changes are made. Do not test during critical operations.
 
-v0.2.0 is not yet validated on target hardware. Run the offline self-test and short smoke test before long tests.
+v0.2.1 adds offline RF and burst-loss regression tests and rejects ping campaigns above 65535 packets per trial to avoid sequence wrap. v0.2.x is not yet validated on target hardware. Run the offline self-test and short smoke test before long tests. See [validation checklist](VALIDATION.md).

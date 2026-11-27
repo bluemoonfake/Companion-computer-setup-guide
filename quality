@@ -19,7 +19,7 @@ import threading
 import queue
 import signal
 
-VERSION = "0.2.0"
+VERSION = "0.2.1"
 ENV = dict(os.environ, LC_ALL="C")
 MODEM = ("2c7c", "0801")
 REPLY = re.compile(r"\bicmp_seq=(\d+)\b.*?\btime([=<])\s*([\d.]+)\s*ms")
@@ -382,6 +382,34 @@ def self_test():
             self.assertEqual(bound, 1)
             self.assertEqual(metrics(replies, 2, 2)["mean_abs_rtt_delta_ms"], 2)
 
+        def test_burst_loss_and_tail(self):
+            replies = {1: (10., False), 4: (160., False), 5: (200., False)}
+            row = metrics(replies, 7, 3)
+            self.assertEqual(row["loss_bursts"], 2)
+            self.assertEqual(row["max_consecutive_loss"], 2)
+            self.assertAlmostEqual(row["rtt_over_150_pct"], 200/3)
+            self.assertEqual(row["p95_abs_rtt_delta_ms"], 40)
+
+        def test_rf_nsa(self):
+            from quality_advanced import parse_qeng
+            raw = ('+QENG: "servingcell","NOCONN"\n'
+                   '+QENG: "LTE","FDD",001,01,ABCDE,123,1700,3,5,5,1234,-73,-9,-40,10,2,-,-\n'
+                   '+QENG: "NR5G-NSA",001,01,456,-69,16,-10,502110,41,8,1\nOK\n')
+            row = parse_qeng(raw)
+            self.assertEqual(row["rat"], "NR5G-NSA")
+            self.assertEqual(row["state"], "NOCONN")
+            self.assertEqual(row["lte_rsrp_dbm"], "-73")
+            self.assertEqual(row["lte_sinr_raw"], "10")
+            self.assertEqual(row["nr_rsrp_dbm"], "-69")
+            self.assertEqual(row["nr_sinr_db"], "16")
+            self.assertEqual(row["nr_band"], "41")
+
+        def test_rf_no_service(self):
+            from quality_advanced import parse_qeng
+            row = parse_qeng('+QENG: "servingcell","SEARCH"\nOK\n')
+            self.assertEqual(row, {"state": "SEARCH"})
+            self.assertNotIn("nr_rsrp_dbm", row)
+
         def test_route_and_reference(self):
             self.assertNotEqual(route_key({"dev": "wt0"}), route_key({"dev": "eth0"}))
             row = dict(measurement="COMPLETE", received=1, mean_ms=90, max_ms=140,
@@ -508,6 +536,9 @@ def main():
     if not plan:
         say("[FAIL] No runnable tests.")
         return 2
+    if any(hz * custom.get(label, (a.duration, 56))[0] > 65535
+           for label, _, _, hz in plan):
+        p.error("Limit each ping test to 65535 packets to avoid ICMP sequence wrap; reduce rate or duration.")
     if os.geteuid() != 0 and any(hz > 5 for _, _, _, hz in plan):
         p.error("Run with sudo for high-rate ping tests (>5 Hz).")
     a.output.mkdir(parents=True, exist_ok=True)
@@ -564,6 +595,8 @@ def main():
         })
     say(f"\nResults: {out}/summary.csv and summary.json")
     say("Raw ping logs and per-packet CSV files are retained locally. Redact IPs before sharing.")
+    for row in rows:
+        say(f"{row['label']} {row['rate_hz']} Hz: {row['measurement']} / {row['reference']}")
     advanced_failed = (any(t.get("status") != "COMPLETE" for t in advanced.get("throughput", [])) or
                        ("rf" in advanced and advanced["rf"].get("samples_ok", 0) == 0))
     return 130 if interrupted else (2 if skipped or advanced_failed or any(r["measurement"] != "COMPLETE" for r in rows) else 0)

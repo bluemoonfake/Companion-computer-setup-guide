@@ -304,6 +304,22 @@ Reboot and verify remote SSH without running `netbird up` again. On the tested m
 
 ## 9. Benchmark NetBird over 5G
 
+**Recommended automated benchmark:** use the executable [quality](quality) and [Network Quality guide](docs/NETWORK_QUALITY.md). The manual commands and historical measurements below remain reference material, not output from the new executable.
+
+~~~bash
+./quality --self-test
+sudo ./quality --mode cellular --deep --duration 10 --soak-duration 30
+# Full cellular benchmark:
+sudo ./quality --mode cellular --deep
+# Optional RF logging (verify the AT port, close minicom):
+sudo apt install -y python3-serial psmisc
+sudo ./quality --mode cellular --deep --rf-port /dev/ttyUSB2
+# NetBird peer benchmark (replace with remote peer IPv4):
+sudo ./quality --mode netbird --netbird PEER_IPV4
+~~~
+
+For optional controlled TCP/UDP throughput and loaded RTT tests, see the Network Quality guide. Do not run these tests in flight.
+
 On the remote Linux client, set `PEER` to the modem host's actual NetBird address:
 
 ~~~bash
@@ -446,6 +462,15 @@ cat /sys/module/88x2bu/parameters/rtw_ips_mode
 Expected on the tested image: driver path ending in `rtl88x2bu`, both values `0`. No out-of-tree module compilation or kernel replacement was needed. To revert this driver override, remove only the above modprobe file and reboot from local access. This driver change is optional and is unrelated to the cellular-only latency benchmark.
 
 ### 12.3. Create Hotspot and Station profiles
+
+**Required for IPv4 shared mode:** install the binary package before activating the Hotspot:
+
+~~~bash
+sudo apt install -y dnsmasq-base
+command -v dnsmasq
+~~~
+
+Do not install the standalone dnsmasq service merely to enable NetworkManager sharing. If the NetworkManager journal reports `Could not find "dnsmasq" binary`, this missing dependency is a confirmed cause of AP IP configuration failure on the tested Ubuntu image. The interactive installer v0.1.1 checks this automatically; no driver change is required for that specific failure.
 
 The existing cellular Ethernet connection remains `CTUAV_cc_5G`. The Wi-Fi AP connection is `CTUAV_Hotspot`, with SSID `CTUAV_cc_5G`. The Station profile can use an existing infrastructure Wi-Fi connection (set its exact name below), or create one named `CTUAV_Station`.
 
@@ -739,6 +764,10 @@ sudo nmcli connection up "$STA_PROFILE"
 ~~~
 
 Run rollback locally. This does not alter ECM, NetBird, or unrelated profiles. For cellular-only operation, simply remove the USB Wi-Fi adapter; no manual switch or service disable is required.
+
+## 13. Installation and quality validation
+
+Follow the [acceptance checklist](docs/VALIDATION.md) for installation, AP/STA switching, reboot, remote access, baseline and advanced measurements. Record actual outcomes and versions separately. The successful manual installation and gateway result do not establish full 5G or flight suitability.
 
 ## References
 

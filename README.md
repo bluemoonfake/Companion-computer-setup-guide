@@ -2,6 +2,20 @@
 
 Interactive installer for Quectel RM520N-GL on Orange Pi 6 / Ubuntu 24.04 (ARM64). Other boards are not hardware-validated.
 
+## Repository layout and versions
+
+| File | Purpose |
+|---|---|
+| [config](config) | Interactive installer v0.1.1; installs the ctuav-net CLI and watchdog |
+| [quality](quality) | Standalone quality tool v0.2.1; does not change network settings |
+| [quality_advanced.py](quality_advanced.py) | RF and controlled throughput support; keep alongside quality |
+| [Manual setup](2nd_dougle_4g_setup.md) | ECM, NetBird, Wi-Fi, recovery and historical benchmarks |
+| [Network quality](docs/NETWORK_QUALITY.md) | Measurement commands, metrics and limitations |
+| [Validation checklist](docs/VALIDATION.md) | Bench acceptance and regression procedure |
+| [Changelog](CHANGELOG.md) | Installer and benchmark changes |
+
+For an already configured board, update quality with git pull --ff-only; no installer rerun or service restart is needed. Updating the installed ctuav-net executable is separate and requires rerunning config from a recovery-capable console.
+
 ## Quick start
 
 Run from a local console (or independent recovery link), not through the Wi-Fi adapter that will be switched.
@@ -92,7 +106,7 @@ Results are saved in a private timestamped directory under `quality-results/` (r
 
 For a detailed procedure and limitations see [Network quality benchmark](docs/NETWORK_QUALITY.md).
 
-## Advanced 5G benchmark (quality v0.2.0)
+## Advanced 5G benchmark (quality v0.2.1)
 
 ~~~bash
 # Deep ICMP only: gateway, two Internet destinations, payload sweep and soak.
@@ -107,7 +121,7 @@ sudo apt install iperf3
 sudo ./quality --mode cellular --deep --iperf-server SERVER_IPV4 --rf-port /dev/ttyUSB2
 ~~~
 
-On the remote authorized host run `iperf3 -s` and restrict access to trusted clients. The client tests TCP both directions (default paced cap 10 Mbps), UDP 1/3/5 Mbps both directions, and concurrent ICMP RTT. Tests consume mobile data and must not run during flight. No public test server is selected automatically. RF is opt-in and uses read-only AT commands; close minicom first. See [advanced benchmark documentation](docs/NETWORK_QUALITY.md#advanced-benchmark-v020).
+On the remote authorized host run `iperf3 -s` and restrict access to trusted clients. The client tests TCP both directions (default paced cap 10 Mbps), UDP 1/3/5 Mbps both directions, and concurrent ICMP RTT. Tests consume mobile data and must not run during flight. No public test server is selected automatically. RF is opt-in and uses read-only AT commands; close minicom first. See [advanced benchmark documentation](docs/NETWORK_QUALITY.md#advanced-benchmark-v02x).
 
 Progress is printed every five seconds during ping. Invalid measurements report actual transmit/receive/parser counts. The fixed-count ping no longer combines -c with a deadline; an external watchdog bounds execution. Raw logs are retained.
 
