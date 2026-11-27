@@ -12,7 +12,7 @@ import time
 import uuid
 from pathlib import Path
 
-VERSION = "0.1.0"
+VERSION = "0.1.1"
 MODEM_ID = ("2c7c", "0801")
 WIFI_ID = ("2357", "0138")
 CELL_NAME = "CTUAV_cc_5G"
@@ -158,6 +158,24 @@ def preflight(install=False):
         say("[OK] RM520N-GL USB detected")
     for name, ident, driver, wireless in interfaces():
         say(f"[INFO] {name}: {':'.join(ident)} driver={driver or 'unknown'} type={'Wi-Fi' if wireless else 'Ethernet/other'}")
+
+
+def hotspot_dependency_available():
+    return bool(shutil.which("dnsmasq") or
+                os.access("/usr/sbin/dnsmasq", os.X_OK) or
+                os.access("/usr/bin/dnsmasq", os.X_OK))
+
+
+def ensure_hotspot_dependency():
+    if not hotspot_dependency_available():
+        say("[WARN] Missing dnsmasq binary (required for IPv4 shared Hotspot/DHCP/DNS).")
+        if not yes("Install dnsmasq-base using apt?"):
+            raise SetupError("Hotspot setup cancelled: dnsmasq-base is required.")
+        run("apt-get", "update", timeout=300, interactive=True)
+        run("apt-get", "install", "-y", "dnsmasq-base", timeout=600, interactive=True)
+    if not hotspot_dependency_available():
+        raise SetupError("dnsmasq binary still missing after installation. Check apt and PATH.")
+    say("[OK] Hotspot dependency: dnsmasq available")
 
 
 def profiles():
@@ -484,15 +502,23 @@ def watchdog():
         target = ap if stable or fallback else sta
         try:
             if not is_active(iface, target):
+                if target == ap and not hotspot_dependency_available():
+                    say("[WARN] AP activation skipped: dnsmasq binary missing. Install dnsmasq-base.")
+                    time.sleep(15)
+                    continue
                 say("Switching Wi-Fi to " + ("AP" if target == ap else "Station"))
                 p = activate(target, iface, 30 if target == ap else 20, check=False)
                 if p.returncode == 0 and is_active(iface, target):
                     say("AP active" if target == ap else "Station connected")
                 elif target == sta:
+                    say(f"[WARN] Station activation: exit={p.returncode}; {p.stderr.strip() or p.stdout.strip() or 'profile not active'}")
                     fallback = True
                     say("Station failed: falling back to AP")
                     # Next iteration activates AP; do not retry Station until presence changes.
                 else:
+                    say(f"[WARN] AP activation: exit={p.returncode}; {p.stderr.strip() or p.stdout.strip() or 'profile not active'}")
+                    if not hotspot_dependency_available():
+                        say("[WARN] Missing dnsmasq binary; install dnsmasq-base.")
                     say("AP activation failed; retrying")
                     time.sleep(15)
         except SetupError as e:
@@ -506,6 +532,11 @@ def watchdog():
 def diagnostics():
     say(f"CTUAV network v{VERSION}")
     preflight()
+    if CONF.exists() or any(i[3] for i in interfaces()):
+        if hotspot_dependency_available():
+            say("[OK] Hotspot dependency: dnsmasq available")
+        else:
+            say("[WARN] Hotspot dependency missing: install dnsmasq-base (required for IPv4 shared mode).")
     for cmd in (("nmcli", "device", "status"),
                 ("nmcli", "-f", "NAME,UUID,TYPE,DEVICE,AUTOCONNECT", "connection", "show"),
                 ("ip", "-4", "route"),
@@ -557,6 +588,8 @@ def setup():
     say("Network changes may disconnect SSH, especially through the selected Wi-Fi interface.")
     if not yes("I have a local console or independent recovery connection; continue"):
         raise SetupError("Cancelled without changing network profiles.")
+    if mode == "1":
+        ensure_hotspot_dependency()
     folder = backup()
     if mode == "1" and run("systemctl", "is-active", "--quiet", SERVICE, check=False).returncode == 0:
         run("systemctl", "stop", SERVICE)

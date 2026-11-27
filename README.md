@@ -19,6 +19,22 @@ The setup wizard detects USB modem 2c7c:0801, CDC-ECM and USB Wi-Fi interfaces, 
 
 If the ECM interface is missing, the wizard offers explicit AT configuration (select a verified AT port, provide APN, confirm modem reset). Existing ECM sessions are not reset. If ModemManager owns the modem, stop and resolve it manually using the detailed guide. The wizard does not change the kernel, install a Wi-Fi driver, change the network renderer, or enroll/reset NetBird automatically. For those optional/manual steps see the detailed guide.
 
+## Hotspot dependency (v0.1.1)
+
+Ubuntu images may omit dnsmasq-base. NetworkManager requires the dnsmasq binary to provide DHCP and DNS in IPv4 shared mode. The installer now checks this before changing Wi-Fi profiles and offers installation; cellular-only mode does not require this package. The read-only check warns if it is missing. The watchdog logs nmcli activation errors instead of silently discarding them.
+
+For an existing v0.1.0 installation with AP activation failure and journal message "Could not find dnsmasq binary", run from the local console:
+
+~~~bash
+sudo systemctl stop ctuav-network.service
+sudo apt update
+sudo apt install -y dnsmasq-base
+sudo systemctl restart ctuav-network.service
+sudo ctuav-net status
+~~~
+
+To update the installed CLI and watchdog to v0.1.1, pull the branch and rerun the wizard, reusing existing profiles. No driver change is required to resolve this missing-package error.
+
 ## Diagnostics and operation
 
 ~~~bash
@@ -55,6 +71,6 @@ For manual setup, measured 5G results, NetBird, driver troubleshooting and recov
 
 ## Validation
 
-Version 0.1.0 is an initial installer implementation, not a hardware-qualified release. The earlier manual ECM/AP/STA configurations were tested on Orange Pi 6. The new executable, automatic AT path, fallback AP and end-to-end installation require on-device validation. Do not use it as a safety-critical control link.
+Version 0.1.1 is an initial installer implementation, not a hardware-qualified release. The earlier manual ECM/AP/STA configurations were tested on Orange Pi 6. The new executable, automatic AT path, fallback AP and end-to-end installation require on-device validation. Do not use it as a safety-critical control link.
 
 CLI workflow inspired by [MAVLink Anywhere](https://github.com/alireza787b/mavlink-anywhere); this is an independent implementation, not a dependency on that project.
