@@ -6,6 +6,10 @@
 >
 > **Important:** This guide uses ECM, not QMI, MBIM or PPP. No separate WireGuard service or custom kernel is required. USB Wi-Fi is optional; see section 12 for automatic Hotspot/Station switching. Perform network changes from a local console or an independent management connection.
 
+## Interactive installer (recommended)
+
+Run from the local console: clone this branch, then run `sudo ./config --check` and `sudo ./config`. See [README](README.md) for the wizard, status and recovery. The script reuses working ECM and Station profiles, creates the missing Hotspot and installs the automatic switching service. The manual sections below remain useful for troubleshooting; do not install both watchdog implementations at once.
+
 ## 0. Requirements and hardware connection
 
 - Ubuntu 24.04 with `sudo` access and temporary Internet access for package installation.

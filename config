@@ -1,0 +1,626 @@
+#!/usr/bin/env python3
+"""Interactive RM520N-GL ECM and USB Wi-Fi setup for Ubuntu 24.04."""
+import argparse
+import getpass
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+import uuid
+from pathlib import Path
+
+VERSION = "0.1.0"
+MODEM_ID = ("2c7c", "0801")
+WIFI_ID = ("2357", "0138")
+CELL_NAME = "CTUAV_cc_5G"
+AP_NAME = "CTUAV_Hotspot"
+STA_NAME = "CTUAV_Station"
+SERVICE = "ctuav-network.service"
+CONF = Path("/etc/ctuav-network/config.json")
+BIN = Path("/usr/local/bin/ctuav-net")
+UNIT = Path("/etc/systemd/system") / SERVICE
+ENV = dict(os.environ, LC_ALL="C")
+ENV.pop("NM_CLI_SHOW_SECRETS", None)
+
+
+class SetupError(Exception):
+    pass
+
+
+def run(*args, check=True, secret=False, timeout=90, interactive=False):
+    try:
+        p = subprocess.run(
+            args, env=ENV, text=True, timeout=timeout,
+            stdout=None if interactive else subprocess.PIPE,
+            stderr=None if interactive else subprocess.PIPE,
+        )
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise SetupError(f"{args[0]}: {type(e).__name__}; check executable/device and retry") from None
+    if check and p.returncode:
+        detail = "" if secret or interactive else (p.stderr or p.stdout or "").strip()
+        raise SetupError(f"{args[0]} failed (exit {p.returncode})" + (f": {detail}" if detail else ""))
+    return p
+
+
+def nm(*args, **kwargs):
+    return run("nmcli", "--wait", "35", *args, **kwargs)
+
+
+def value(*args):
+    return nm("--escape", "no", "-g", *args).stdout.strip()
+
+
+def say(message):
+    print(message, flush=True)
+
+
+def ask(label, default=None):
+    suffix = f" [{default}]" if default is not None else ""
+    result = input(f"{label}{suffix}: ").strip()
+    return result or default or ""
+
+
+def yes(label, default=False):
+    result = ask(label + (" [Y/n]" if default else " [y/N]"))
+    return default if not result else result.lower() in ("y", "yes")
+
+
+def password(label):
+    p = getpass.getpass(label + " (8-63 printable ASCII characters): ")
+    if not 8 <= len(p) <= 63 or not all(32 <= ord(c) <= 126 for c in p):
+        raise SetupError("Invalid WPA2 passphrase; use 8-63 printable ASCII characters.")
+    if p != getpass.getpass("Repeat password: "):
+        raise SetupError("Passwords do not match.")
+    return p
+
+
+def require_root():
+    if os.geteuid() != 0:
+        raise SetupError("Run this operation with sudo.")
+
+
+def usb_id(path):
+    try:
+        path = path.resolve(strict=True)
+        for item in (path, *path.parents):
+            v, p = item / "idVendor", item / "idProduct"
+            if v.is_file() and p.is_file():
+                return (v.read_text().strip().lower(), p.read_text().strip().lower())
+    except OSError:
+        pass
+    return None
+
+
+def modem_present():
+    return any(usb_id(p) == MODEM_ID for p in Path("/sys/bus/usb/devices").glob("*"))
+
+
+def interfaces():
+    result = []
+    for p in sorted(Path("/sys/class/net").glob("*")):
+        dev = p / "device"
+        ident = usb_id(dev)
+        driver = (dev / "driver").resolve().name if (dev / "driver").exists() else ""
+        wireless = (p / "wireless").exists() or (p / "phy80211").exists()
+        if ident:
+            result.append((p.name, ident, driver, wireless))
+    return result
+
+
+def pick(label, options, default=None):
+    if not options:
+        raise SetupError(f"No {label} found.")
+    for i, (key, description) in enumerate(options, 1):
+        say(f"  {i}) {description}")
+    if default is None:
+        default = options[0][0] if len(options) == 1 else None
+    n = next((str(i) for i, (key, _) in enumerate(options, 1) if key == default), None)
+    answer = ask(label + " number", n)
+    if not answer.isdigit() or not 1 <= int(answer) <= len(options):
+        raise SetupError("Invalid selection.")
+    return options[int(answer)-1][0]
+
+
+def os_check():
+    data = {}
+    for line in Path("/etc/os-release").read_text().splitlines():
+        if "=" in line:
+            k, v = line.split("=", 1)
+            data[k] = v.strip('"')
+    say(f"[INFO] OS: {data.get('PRETTY_NAME', 'unknown')} / {os.uname().machine} / {os.uname().release}")
+    if data.get("ID") != "ubuntu" or data.get("VERSION_ID") != "24.04":
+        raise SetupError("Supported target is Ubuntu 24.04; no changes made.")
+
+
+def preflight(install=False):
+    os_check()
+    required = {"nmcli": "network-manager", "ip": "iproute2", "ping": "iputils-ping",
+                "lsusb": "usbutils", "systemctl": None}
+    missing = [name for name in required if not shutil.which(name)]
+    if missing:
+        say("[FAIL] Missing tools: " + ", ".join(missing))
+        packages = sorted({required[n] for n in missing if required[n]})
+        if not install or len(packages) == 0 or any(required[n] is None for n in missing):
+            raise SetupError("Install the missing tools and run again.")
+        if not yes("Install missing packages with apt? This may affect networking"):
+            raise SetupError("Dependencies not installed.")
+        run("apt-get", "update", timeout=300, interactive=True)
+        run("apt-get", "install", "-y", *packages, timeout=600, interactive=True)
+    if run("systemctl", "is-active", "--quiet", "NetworkManager", check=False).returncode:
+        raise SetupError("NetworkManager is not running. Configure the host renderer and start it first; no automatic renderer changes.")
+    say("[OK] NetworkManager running")
+    if not modem_present():
+        say("[WARN] RM520N-GL USB 2c7c:0801 not detected")
+    else:
+        say("[OK] RM520N-GL USB detected")
+    for name, ident, driver, wireless in interfaces():
+        say(f"[INFO] {name}: {':'.join(ident)} driver={driver or 'unknown'} type={'Wi-Fi' if wireless else 'Ethernet/other'}")
+
+
+def profiles():
+    items = []
+    for line in nm("-t", "-f", "UUID,TYPE", "connection", "show").stdout.splitlines():
+        uid, _, kind = line.partition(":")
+        if not uid or not kind:
+            continue
+        name = value("connection.id", "connection", "show", "uuid", uid)
+        items.append((uid, kind, name))
+    return items
+
+
+def find_named(name, kinds):
+    matches = [(uid, kind) for uid, kind, label in profiles() if label == name]
+    if len(matches) > 1:
+        raise SetupError(f"Duplicate connection name {name}; resolve duplicates first.")
+    if matches and matches[0][1] not in kinds:
+        raise SetupError(f"Connection {name} has unexpected type {matches[0][1]}.")
+    return matches[0][0] if matches else None
+
+
+def active_uuid(iface):
+    p = nm("-t", "-f", "UUID,DEVICE", "connection", "show", "--active", check=False)
+    if p.returncode:
+        return None
+    for line in p.stdout.splitlines():
+        uid, _, dev = line.partition(":")
+        if dev == iface:
+            return uid
+    return None
+
+
+def is_active(iface, uid):
+    if active_uuid(iface) != uid:
+        return False
+    p = nm("-g", "GENERAL.STATE", "device", "show", iface, check=False)
+    return p.returncode == 0 and p.stdout.strip().split(" ", 1)[0] == "100"
+
+
+def modify(uid, *props, secret=False):
+    nm("connection", "modify", "uuid", uid, *props, secret=secret)
+
+
+def activate(uid, iface, seconds=30, check=True):
+    return run("nmcli", "--wait", str(seconds), "connection", "up", "uuid", uid,
+               "ifname", iface, timeout=seconds+8, check=check)
+
+
+def add_profile(*args, secret=False):
+    uid = str(uuid.uuid4())
+    nm("connection", "add", *args, "connection.uuid", uid, secret=secret)
+    return uid
+
+
+def backup():
+    folder = Path("/var/backups/ctuav-network") / time.strftime("%Y%m%d-%H%M%S")
+    folder.mkdir(parents=True, mode=0o700, exist_ok=False)
+    os.chmod(folder.parent, 0o700)
+    for p in (Path("/etc/NetworkManager/system-connections"), CONF, BIN, UNIT,
+              Path("/etc/default/ctuav-network"), Path("/usr/local/bin/ctuav-network-watchdog.sh")):
+        if p.is_dir():
+            shutil.copytree(p, folder / p.name, symlinks=True)
+        elif p.is_file():
+            shutil.copy2(p, folder / p.name)
+    say(f"[OK] Root-only backup: {folder} (may contain Wi-Fi secrets; do not share)")
+    return folder
+
+
+def configure_modem():
+    """Only needed when no ECM interface is present; changes modem NVRAM."""
+    if not modem_present():
+        raise SetupError("Connect the RM520N-GL first.")
+    ports = [(str(p), str(p)) for p in sorted(Path("/dev").glob("ttyUSB*"))
+             if usb_id(Path("/sys/class/tty") / p.name / "device") == MODEM_ID]
+    default = "/dev/ttyUSB2" if any(p[0] == "/dev/ttyUSB2" for p in ports) else None
+    port = pick("RM520N AT port", ports, default)
+    if run("systemctl", "is-active", "--quiet", "ModemManager", check=False).returncode == 0:
+        raise SetupError("ModemManager is active and may own the AT port. On a dedicated ECM-only host, stop/disable it after reviewing other modems (guide section 2), then retry.")
+    if shutil.which("fuser") and run("fuser", port, check=False).returncode == 0:
+        raise SetupError(f"{port} is in use; close minicom or other serial applications.")
+    try:
+        import serial
+    except ImportError:
+        if not yes("Install python3-serial for AT command support?"):
+            raise SetupError("Install python3-serial or use manual AT setup from the guide.")
+        run("apt-get", "install", "-y", "python3-serial", interactive=True, timeout=300)
+        try:
+            import serial
+        except ImportError:
+            raise SetupError("Run with Ubuntu system Python (/usr/bin/python3).") from None
+    apn = ask("Carrier APN (required)")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.-]{0,99}", apn):
+        raise SetupError("Invalid or empty APN.")
+    if not yes("Apply ECM/automatic data settings and reset the modem? Existing cellular sessions will disconnect"):
+        raise SetupError("Modem setup cancelled.")
+    with serial.Serial(port, 115200, timeout=0.2, write_timeout=2, exclusive=True) as ser:
+        def at(command, seconds=5):
+            ser.reset_input_buffer()
+            ser.write((command + "\r").encode("ascii"))
+            ser.flush()
+            buf = b""
+            until = time.monotonic() + seconds
+            while time.monotonic() < until:
+                buf += ser.read(4096)
+                lines = buf.decode("ascii", errors="replace").splitlines()
+                if any(x.strip() == "OK" for x in lines):
+                    return "\n".join(lines)
+                if any(x.strip() == "ERROR" or x.startswith(("+CME ERROR", "+CMS ERROR")) for x in lines):
+                    break
+            raise SetupError(f"AT command {command.split('=')[0]} failed or timed out; inspect manually before retrying.")
+        at("AT")
+        if "RM520N" not in at("ATI").upper():
+            raise SetupError("Selected serial port did not identify an RM520N modem.")
+        if "+CPIN: READY" not in at("AT+CPIN?"):
+            raise SetupError("SIM not ready; check SIM/PIN manually.")
+        for command in ('AT+QCFG="usbnet",1', 'AT+QCFG="data_interface",0,0',
+                        f'AT+CGDCONT=1,"IPV4V6","{apn}"',
+                        'AT+QNWPREFCFG="mode_pref",AUTO', "AT+COPS=0",
+                        "AT+QMAPWAC=1", "AT+CFUN=1"):
+            at(command, 120 if command == "AT+COPS=0" else 15)
+            say(f"[OK] {command.split('=')[0]}")
+        try:
+            at("AT+CFUN=1,1", 10)
+        except (SetupError, serial.SerialException):
+            say("[WARN] Reset response not confirmed; USB may have disconnected.")
+    say("Wait for USB re-enumeration; if no ECM interface appears, replug locally and rerun sudo ./config.")
+    for _ in range(45):
+        time.sleep(2)
+        if any(i[1] == MODEM_ID and i[2] == "cdc_ether" for i in interfaces()):
+            return
+    raise SetupError("ECM interface not detected after reset; inspect lsusb -t and the manual guide.")
+
+
+def setup_cell():
+    cells = [i for i in interfaces() if i[1] == MODEM_ID and i[2] == "cdc_ether"]
+    if not cells:
+        if not yes("ECM interface missing. Configure modem AT settings now?"):
+            raise SetupError("No ECM interface; follow guide sections 1-3.")
+        configure_modem()
+        cells = [i for i in interfaces() if i[1] == MODEM_ID and i[2] == "cdc_ether"]
+    if len(cells) != 1 or sum(i[2] == "cdc_ether" for i in interfaces()) != 1:
+        raise SetupError("Expected exactly one cdc_ether interface; driver-only match would be ambiguous.")
+    iface = cells[0][0]
+    uid = find_named(CELL_NAME, ("802-3-ethernet", "ethernet"))
+    if uid is None:
+        uid = add_profile("type", "ethernet", "ifname", "*", "con-name", CELL_NAME,
+                          "connection.autoconnect", "no", "match.driver", "cdc_ether")
+    desired = {
+        "connection.interface-name": "", "802-3-ethernet.mac-address": "",
+        "match.driver": "cdc_ether", "connection.autoconnect": "yes",
+        "connection.autoconnect-priority": "100", "connection.autoconnect-retries": "0",
+        "ipv4.method": "auto", "ipv4.route-metric": "100",
+        "ipv6.method": "auto", "ipv6.route-metric": "100",
+    }
+    differences = [k for k, v in desired.items() if value(k, "connection", "show", "uuid", uid) != v]
+    if differences:
+        say("[INFO] Applying ECM profile settings: " + ", ".join(differences))
+        modify(uid, *[item for k in differences for item in (k, desired[k])])
+    else:
+        say("[OK] Existing ECM profile matches desired settings")
+    if not is_active(iface, uid):
+        activate(uid, iface, 60)
+    elif differences:
+        # Apply changed persistent settings without bouncing a working link.
+        say("[INFO] ECM changes saved; active session kept. They apply on next activation.")
+    p = run("ping", "-I", iface, "-c", "3", "-W", "3", "1.1.1.1", timeout=20, check=False)
+    say("[OK] Cellular Internet ping" if p.returncode == 0 else "[WARN] Cellular ping failed; check APN, coverage or ICMP filtering.")
+    say(p.stdout.strip())
+    return iface
+
+
+def wifi_setup(iface):
+    cap = value("WIFI-PROPERTIES.AP", "device", "show", iface)
+    if cap != "yes":
+        raise SetupError(f"{iface} does not report AP support. Check the driver; no automatic kernel/driver replacement.")
+    say(f"[OK] {iface} supports AP mode")
+    sta_options = []
+    current = active_uuid(iface)
+    for uid, kind, name in profiles():
+        if kind not in ("wifi", "802-11-wireless"):
+            continue
+        mode = value("802-11-wireless.mode", "connection", "show", "uuid", uid)
+        bound = value("connection.interface-name", "connection", "show", "uuid", uid)
+        if mode in ("", "infrastructure", "--") and bound in ("", "--", iface):
+            sta_options.append((uid, f"{name} ({'active' if uid == current else 'saved'})"))
+    sta_options.append(("new", "Create new WPA2-Personal Station profile"))
+    sta = pick("Station profile", sta_options, current if any(x[0] == current for x in sta_options) else (sta_options[0][0] if len(sta_options) == 1 else None))
+    if sta == "new":
+        if find_named(STA_NAME, ("wifi", "802-11-wireless")):
+            raise SetupError("CTUAV_Station already exists; select it instead.")
+        ssid = ask("Infrastructure Wi-Fi SSID")
+        if not ssid or len(ssid.encode()) > 32:
+            raise SetupError("SSID must be 1-32 bytes.")
+        psk = password("Station WPA2 password")
+        sta = add_profile("type", "wifi", "ifname", iface, "con-name", STA_NAME,
+                          "ssid", ssid, "connection.autoconnect", "no",
+                          "wifi-sec.key-mgmt", "wpa-psk", "wifi-sec.psk", psk, secret=True)
+        del psk
+    else:
+        say("[OK] Reusing saved Station credentials")
+    ap = find_named(AP_NAME, ("wifi", "802-11-wireless"))
+    if ap:
+        if value("802-11-wireless.mode", "connection", "show", "uuid", ap) != "ap":
+            raise SetupError("CTUAV_Hotspot exists but is not AP mode; rename it before continuing.")
+        say("[OK] Reusing existing Hotspot SSID/password")
+    else:
+        ssid = ask("Hotspot SSID", CELL_NAME)
+        if not ssid or len(ssid.encode()) > 32:
+            raise SetupError("SSID must be 1-32 bytes.")
+        psk = password("Hotspot WPA2 password")
+        ap = add_profile("type", "wifi", "ifname", iface, "con-name", AP_NAME, "ssid", ssid,
+                         "connection.autoconnect", "no", "802-11-wireless.mode", "ap",
+                         "wifi-sec.key-mgmt", "wpa-psk", "wifi-sec.psk", psk, secret=True)
+        del psk
+    # Detect obvious overlapping routes; avoid reconfiguring unrelated interfaces.
+    routes = run("ip", "-4", "route", "show", "table", "main").stdout.splitlines()
+    import ipaddress
+    subnet = ipaddress.ip_network("192.168.50.0/24")
+    for line in routes:
+        parts = line.split()
+        if not parts or parts[0] == "default":
+            continue
+        try:
+            existing = ipaddress.ip_network(parts[0], strict=False)
+        except ValueError:
+            continue
+        if existing.overlaps(subnet) and not ("dev " + iface + " ") in line + " ":
+            raise SetupError(f"Hotspot subnet overlaps existing route: {line}")
+    if ap == sta:
+        raise SetupError("AP and Station profiles must be different.")
+    modify(ap, "connection.interface-name", iface, "802-11-wireless.mode", "ap",
+           "802-11-wireless.band", "bg", "802-11-wireless.channel", "6",
+           "ipv4.method", "shared", "ipv4.addresses", "192.168.50.1/24",
+           "ipv4.gateway", "", "ipv6.method", "disabled", "connection.autoconnect", "no")
+    modify(sta, "connection.interface-name", iface, "802-11-wireless.mode", "infrastructure",
+           "ipv4.method", "auto", "ipv4.route-metric", "600", "ipv6.route-metric", "600",
+           "connection.autoconnect", "no")
+    return ap, sta
+
+
+def atomic_write(path, content, mode):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    import tempfile
+    fd, name = tempfile.mkstemp(prefix=".ctuav-", dir=path.parent)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            os.fchmod(f.fileno(), mode)
+            f.write(content)
+        os.replace(name, path)
+    finally:
+        if os.path.exists(name):
+            os.unlink(name)
+
+
+def install_cli():
+    atomic_write(BIN, Path(__file__).resolve().read_bytes(), 0o755)
+
+
+def install_watchdog(iface, ap, sta):
+    install_cli()
+    atomic_write(CONF, (json.dumps({"wifi": iface, "ap_uuid": ap, "sta_uuid": sta}, indent=2) + "\n").encode(), 0o600)
+    text = """[Unit]
+Description=CTUAV RM520N-GL / USB Wi-Fi Watchdog
+After=NetworkManager.service
+Wants=NetworkManager.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/ctuav-net --watchdog
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+"""
+    atomic_write(UNIT, text.encode(), 0o644)
+    run("systemctl", "daemon-reload")
+    run("systemctl", "enable", SERVICE)
+    run("systemctl", "restart", SERVICE)
+    say("[OK] Watchdog enabled and started")
+
+
+def load_config():
+    try:
+        d = json.loads(CONF.read_text())
+        if not re.fullmatch(r"[A-Za-z0-9_.-]{1,15}", d["wifi"]):
+            raise ValueError("invalid interface name")
+        for k in ("ap_uuid", "sta_uuid"):
+            uuid.UUID(d[k])
+        if d["ap_uuid"] == d["sta_uuid"]:
+            raise ValueError("duplicate UUID")
+        return d
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        raise SetupError(f"Missing or invalid {CONF}: {e}") from None
+
+
+def watchdog():
+    require_root()
+    cfg = load_config()
+    iface, ap, sta = cfg["wifi"], cfg["ap_uuid"], cfg["sta_uuid"]
+    stable = candidate = None
+    count = 0
+    fallback = False
+    say("CTUAV network watchdog started")
+    while True:
+        if not (Path("/sys/class/net") / iface).exists():
+            stable = candidate = None
+            count = 0
+            fallback = False
+            time.sleep(2)
+            continue
+        observed = modem_present()
+        if candidate != observed:
+            candidate, count = observed, 1
+        else:
+            count = min(3, count + 1)
+        if count < 3:
+            time.sleep(2)
+            continue
+        if stable != candidate:
+            stable, fallback = candidate, False
+            say("Modem state: " + ("present" if stable else "absent"))
+        target = ap if stable or fallback else sta
+        try:
+            if not is_active(iface, target):
+                say("Switching Wi-Fi to " + ("AP" if target == ap else "Station"))
+                p = activate(target, iface, 30 if target == ap else 20, check=False)
+                if p.returncode == 0 and is_active(iface, target):
+                    say("AP active" if target == ap else "Station connected")
+                elif target == sta:
+                    fallback = True
+                    say("Station failed: falling back to AP")
+                    # Next iteration activates AP; do not retry Station until presence changes.
+                else:
+                    say("AP activation failed; retrying")
+                    time.sleep(15)
+        except SetupError as e:
+            say(f"[WARN] {e}")
+            if target == sta:
+                fallback = True
+            time.sleep(15)
+        time.sleep(2)
+
+
+def diagnostics():
+    say(f"CTUAV network v{VERSION}")
+    preflight()
+    for cmd in (("nmcli", "device", "status"),
+                ("nmcli", "-f", "NAME,UUID,TYPE,DEVICE,AUTOCONNECT", "connection", "show"),
+                ("ip", "-4", "route"),
+                ("ip", "route", "get", "1.1.1.1"),
+                ("systemctl", "is-enabled", SERVICE),
+                ("systemctl", "is-active", SERVICE)):
+        p = run(*cmd, check=False)
+        say("$ " + " ".join(cmd))
+        say((p.stdout + p.stderr).strip() or f"exit={p.returncode}")
+    if CONF.exists():
+        try:
+            cfg = load_config()
+            say(f"[INFO] Watchdog interface: {cfg['wifi']}")
+            if modem_present() and not is_active(cfg["wifi"], cfg["ap_uuid"]):
+                say("[WARN] Modem present but AP not active (transition or failure)")
+            if not modem_present() and not (is_active(cfg["wifi"], cfg["sta_uuid"]) or is_active(cfg["wifi"], cfg["ap_uuid"])):
+                say("[WARN] Neither Station nor fallback AP is active")
+        except SetupError as e:
+            say(f"[WARN] {e}")
+    else:
+        say("[WARN] Watchdog configuration missing; run sudo ./config")
+    if shutil.which("netbird"):
+        p = run("netbird", "status", check=False, timeout=20)
+        say("[INFO] NetBird (local status; redact private details before sharing)")
+        say((p.stdout + p.stderr).strip())
+    else:
+        say("[INFO] NetBird not installed; optional manual enrollment in guide section 7.")
+
+
+def setup():
+    require_root()
+    if not sys.stdin.isatty():
+        raise SetupError("Interactive terminal required.")
+    preflight(install=True)
+    if not modem_present():
+        raise SetupError("Connect RM520N-GL for initial installation (USB presence required).")
+    wifi = [(i[0], f"{i[0]} ({':'.join(i[1])}, {i[2]})") for i in interfaces() if i[3]]
+    say("1) 5G ECM + USB Wi-Fi automatic switching")
+    say("2) 5G ECM only (leave Wi-Fi/Watchdog untouched)")
+    mode = ask("Setup mode", "1" if wifi else "2")
+    if mode not in ("1", "2"):
+        raise SetupError("Invalid mode.")
+    iface = None
+    if mode == "1":
+        preferred = [i[0] for i in interfaces() if i[3] and i[1] == WIFI_ID]
+        iface = pick("USB Wi-Fi interface", wifi, preferred[0] if len(preferred) == 1 else None)
+        if value("WIFI-PROPERTIES.AP", "device", "show", iface) != "yes":
+            raise SetupError("Selected interface does not support AP mode. See guide section 12.2; no driver changes made.")
+    say("Network changes may disconnect SSH, especially through the selected Wi-Fi interface.")
+    if not yes("I have a local console or independent recovery connection; continue"):
+        raise SetupError("Cancelled without changing network profiles.")
+    folder = backup()
+    if mode == "1" and run("systemctl", "is-active", "--quiet", SERVICE, check=False).returncode == 0:
+        run("systemctl", "stop", SERVICE)
+    try:
+        setup_cell()
+        if mode == "2":
+            install_cli()
+            say("[OK] ECM setup complete; Wi-Fi and existing watchdog left unchanged.")
+            diagnostics()
+            return
+        ap, sta = wifi_setup(iface)
+        if yes("Enable automatic Wi-Fi switching now? This will disconnect the current Wi-Fi client", True):
+            install_watchdog(iface, ap, sta)
+            # Verify the desired profile actually activates, not just that systemd started.
+            for _ in range(45):
+                if modem_present() and is_active(iface, ap):
+                    say("[OK] Hotspot active at 192.168.50.1")
+                    break
+                if not modem_present() and (is_active(iface, sta) or is_active(iface, ap)):
+                    say("[OK] Station or fallback AP active")
+                    break
+                time.sleep(2)
+            else:
+                raise SetupError("Watchdog started but expected Wi-Fi profile did not activate. Check journal and recover from console.")
+        else:
+            say("[WARN] Watchdog not enabled. Profiles saved; Station autoconnect remains off. Restore manually if needed.")
+        diagnostics()
+    except (SetupError, KeyboardInterrupt, EOFError):
+        say(f"[RECOVERY] Backup: {folder}")
+        say(f"[RECOVERY] From local console: sudo systemctl stop {SERVICE}")
+        say("[RECOVERY] List profiles: nmcli connection show")
+        say("[RECOVERY] Restore selected Station autoconnect and activate by UUID: sudo nmcli con mod uuid UUID connection.autoconnect yes; sudo nmcli con up uuid UUID")
+        say("[RECOVERY] No automatic rollback of AT settings or NetworkManager changes. Review backup before restoring keyfiles.")
+        raise
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("--check", action="store_true", help="read-only hardware/profile diagnostics")
+    group.add_argument("--status", action="store_true", help="read-only status")
+    group.add_argument("--logs", action="store_true", help="show last 80 watchdog log lines")
+    group.add_argument("--watchdog", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--version", action="version", version=VERSION)
+    parser.add_argument("command", nargs="?", choices=["status", "check", "logs", "setup"])
+    args = parser.parse_args()
+    if args.command and any((args.check, args.status, args.logs, args.watchdog)):
+        parser.error("Use either a command or an option, not both.")
+    try:
+        if args.watchdog:
+            watchdog()
+        elif args.check or args.status or args.command in ("check", "status"):
+            diagnostics()
+        elif args.logs or args.command == "logs":
+            p = run("journalctl", "-u", SERVICE, "-n", "80", "--no-pager", check=False)
+            say(p.stdout + p.stderr)
+            return p.returncode
+        else:
+            setup()
+    except (SetupError, OSError, KeyboardInterrupt, EOFError) as e:
+        say(f"[FAIL] {e or 'Operation cancelled'}")
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
