@@ -27,11 +27,11 @@ ip -4 route
 
 ## 2. SSH
 
-From an authorized remote host, replace NETBIRD_IP with the companion's current overlay IPv4. Use OpenSSH and restrict TCP 22 to trusted peers.
+From an authorized remote host, replace YOUR_USERNAME with the companion account and NETBIRD_IP with its current overlay IPv4. Use OpenSSH and restrict TCP 22 to trusted peers.
 
 ~~~bash
 ping -c 10 NETBIRD_IP
-ssh ctuav@NETBIRD_IP
+ssh YOUR_USERNAME@NETBIRD_IP
 ~~~
 
 ## 3. Startup error 209/STDOUT
