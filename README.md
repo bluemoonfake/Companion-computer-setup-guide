@@ -2,6 +2,54 @@
 
 A modular setup repository for embedded Linux companion computers (Raspberry Pi 5, Orange Pi 6 and compatible Ubuntu 24.04 systems) connecting to PX4 over Ethernet. Install the OS and flight-controller middleware independently of optional cellular, Wi-Fi and NetBird. This branch implements RM520N-GL ECM networking; other modem branches retain their own historical guides.
 
+## Hardware examples
+
+The following reference hardware illustrates the intended companion-computer platforms and optional cellular connection. The images are product photographs from the linked suppliers, not photographs of a validated integrated assembly.
+
+### Embedded companion computers
+
+<table>
+  <tr>
+    <td align="center" width="33%">
+      <a href="https://orangepi.vn/shop/orange-pi-6-phien-ban-8gb-ram"><img src="https://orangepivn.b-cdn.net/wp-content/uploads/2026/07/orangepi6-3-247x296.webp" alt="Orange Pi 6 single-board computer" width="220"></a>
+    </td>
+    <td align="center" width="33%">
+      <a href="https://geekworm.com/products/raspberry-pi-5-board"><img src="https://geekworm.com/cdn/shop/files/raspberrypi5-top_2048x2048.jpg?v=1705153559" alt="Raspberry Pi 5 single-board computer" width="220"></a>
+    </td>
+    <td align="center" width="33%">
+      <a href="https://marketplace.nvidia.com/en-us/enterprise/robotics-edge/jetson-orin-nano-super-developer-kit/"><img src="https://marketplace.nvidia.com/assets/images/jetsonorin-nano-super-dev-kit-1920_1080h.jpg" alt="NVIDIA Jetson Orin Nano Super Developer Kit" width="220"></a>
+    </td>
+  </tr>
+  <tr>
+    <td align="center"><strong>Orange Pi 6</strong><br>ARM64 edge computing<br>RM520N-GL ECM bench-tested<br><a href="https://orangepi.vn/shop/orange-pi-6-phien-ban-8gb-ram">Photo / product</a></td>
+    <td align="center"><strong>Raspberry Pi 5</strong><br>ARM64 companion computer<br>PX4 Ethernet bench-tested<br><a href="https://www.raspberrypi.com/products/raspberry-pi-5/">Official product</a> · <a href="https://geekworm.com/products/raspberry-pi-5-board">Photo</a></td>
+    <td align="center"><strong>Jetson Orin Nano Super</strong><br>GPU-accelerated edge computing<br>Reference only; not validated<br><a href="https://marketplace.nvidia.com/en-us/enterprise/robotics-edge/jetson-orin-nano-super-developer-kit/">Photo / product</a></td>
+  </tr>
+</table>
+
+Use the correct Ubuntu 24.04 board image and vendor BSP. For Jetson, verify the exact board's NVIDIA JetPack/L4T and Ubuntu compatibility before installation; do not flash a generic Ubuntu image or assume that this repository has been validated on Jetson. See [base system setup](docs/01_UBUNTU_24_04.md).
+
+### Optional 5G cellular hardware
+
+<table>
+  <tr>
+    <td align="center" width="50%">
+      <a href="https://spotpear.com/shop/Quectel-IOT-Sub-6G-5G-4G-3G-Factor-M.2-LTE-A-Cat-6-NSA-GNSS-DFOTA-VoLTE-RM520N-GL.html"><img src="https://cdn.static.spotpear.com/uploads/picture/product/module/gsm-gps/RM520N-GL/RM520N-GL-details-01.jpg" alt="Quectel RM520N-GL M.2 5G modem, front and rear" width="245"></a>
+    </td>
+    <td align="center" width="50%">
+      <a href="https://www.waveshare.com/product/rm520n-gl-5g-hat-with-case.htm"><img src="https://www.waveshare.com/media/catalog/product/cache/1/image/800x800/9df78eab33525d08d6e5fb8d27136e95/r/m/rm520n-gl-5g-hat-with-case-4.jpg" alt="Waveshare M.2 to 4G/5G HAT with RM520N-GL modem" width="245"></a>
+    </td>
+  </tr>
+  <tr>
+    <td align="center"><strong>Quectel RM520N-GL</strong><br>M.2 5G Sub-6 GHz modem<br><a href="https://www.quectel.com/product/5g-rm520n-series/">Official product</a> · <a href="https://spotpear.com/shop/Quectel-IOT-Sub-6G-5G-4G-3G-Factor-M.2-LTE-A-Cat-6-NSA-GNSS-DFOTA-VoLTE-RM520N-GL.html">Photo</a></td>
+    <td align="center"><strong>M.2 to 4G/5G HAT</strong><br>USB adapter, SIM slot and antenna connections<br><a href="https://www.waveshare.com/product/rm520n-gl-5g-hat-with-case.htm">Photo / product</a></td>
+  </tr>
+</table>
+
+The reference cellular setup uses the RM520N-GL on a compatible USB 3.0 adapter in CDC-ECM mode, with a data SIM, suitable power and the required antennas. The HAT form factor does not establish GPIO, carrier-board or PCIe compatibility across platforms; verify the specific adapter and use the documented USB connection. See [RM520N-GL setup](docs/05_RM520N_GL.md) and [network quality benchmark](docs/NETWORK_QUALITY.md). SIM7600 variants are documented separately in their respective branches.
+
+*Photo credits: Orange Pi Vietnam, Geekworm, NVIDIA, Spotpear and Waveshare. Images are linked to their original hosts for hardware identification; rights remain with their respective owners. Third-party image availability is outside this repository's control.*
+
 ## Setup order
 
 | Step | Guide |
