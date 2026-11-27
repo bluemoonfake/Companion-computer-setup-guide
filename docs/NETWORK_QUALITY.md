@@ -57,6 +57,23 @@ sudo ./quality --mode cellular --deep --iperf-server SERVER_IPV4 \
   --rf-port /dev/ttyUSB2 --tcp-mbps 10 --udp-mbps 1,3,5 --load-duration 30
 ~~~
 
+## Cloudflare HTTP (no private server)
+
+Install curl and run an opt-in HTTP test. Default: three 25 MB downloads and three 10 MB uploads (105 MB payload plus overhead).
+
+~~~bash
+sudo apt install -y curl
+sudo ./quality --mode cellular --deep --rf-port /dev/ttyUSB2 --cloudflare
+~~~
+
+Short trial:
+
+~~~bash
+sudo ./quality --mode cellular --duration 10 --cloudflare --http-repeat 1
+~~~
+
+The tool binds curl to the cellular interface, pins the resolved IPv4 address, validates HTTP status and payload bytes, and records ping for five seconds before and after each request. Results: cloudflare-summary.json and per-trial curl, ping, CSV and metadata files. RTT samples within the HTTP request window are not proof of sustained saturation; short transfers may have few samples. Overall ICMP loss is not UDP loss. HTTP goodput is endpoint-dependent, not peak modem capacity. Public endpoint availability is not guaranteed; use iperf3 for controlled UDP tests. No server is installed.
+
 ## 5. Results
 
 ~~~bash

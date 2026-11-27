@@ -19,7 +19,7 @@ import threading
 import queue
 import signal
 
-VERSION = "0.2.1"
+VERSION = "0.2.2"
 ENV = dict(os.environ, LC_ALL="C")
 MODEM = ("2c7c", "0801")
 REPLY = re.compile(r"\bicmp_seq=(\d+)\b.*?\btime([=<])\s*([\d.]+)\s*ms")
@@ -441,6 +441,10 @@ def main():
     p.add_argument("--secondary-internet", type=ipv4, default="8.8.8.8")
     p.add_argument("--rf-port", help="optional verified/free RM520N AT port, e.g. /dev/ttyUSB2")
     p.add_argument("--rf-interval", type=int, default=5, help="seconds between RF samples (2..60)")
+    p.add_argument("--cloudflare", action="store_true", help="optional public HTTP upload/download tests with concurrent RTT")
+    p.add_argument("--http-repeat", type=int, default=3, help="HTTP trials per direction (1..5)")
+    p.add_argument("--http-download-mb", type=int, default=25, help="decimal MB per download (1..100)")
+    p.add_argument("--http-upload-mb", type=int, default=10, help="decimal MB per upload (1..25)")
     p.add_argument("--iperf-server", type=ipv4, help="optional explicitly authorized IPv4 iperf3 server on cellular route")
     p.add_argument("--iperf-port", type=int, default=5201)
     p.add_argument("--load-duration", type=int, default=30, help="iperf/loaded RTT nominal duration (10..120 s)")
@@ -463,6 +467,10 @@ def main():
         p.error("soak duration 10..1800 s; RF interval 2..60 s")
     if not 10 <= a.load_duration <= 120 or not 1 <= a.iperf_port <= 65535 or not 1 <= a.tcp_mbps <= 100:
         p.error("load duration 10..120 s; iperf port 1..65535; TCP cap 1..100 Mbps")
+    if not 1 <= a.http_repeat <= 5 or not 1 <= a.http_download_mb <= 100 or not 1 <= a.http_upload_mb <= 25:
+        p.error("HTTP repeats 1..5, download MB 1..100, upload MB 1..25")
+    if a.cloudflare and (a.mode not in ("all", "cellular") or os.geteuid() != 0):
+        p.error("--cloudflare requires cellular/all mode and sudo")
     if a.deep and a.mode not in ("all", "cellular"):
         p.error("--deep requires cellular or all mode")
     if (a.iperf_server or a.rf_port) and a.mode not in ("all", "cellular"):
@@ -527,6 +535,8 @@ def main():
             plan.append(("local", a.local, iface, a.baseline_rate))
         except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as e:
             skipped.append("Local: " + str(e))
+    if a.cloudflare and not cell_iface:
+        skipped.append("Cloudflare: no verified cellular interface")
     if a.iperf_server and not cell_iface:
         skipped.append("Throughput: no verified cellular interface")
     if a.rf_port and not cell_iface:
@@ -568,6 +578,13 @@ def main():
                 w = csv.DictWriter(f, fieldnames=FIELDS)
                 w.writeheader()
                 w.writerows(rows)
+        if a.cloudflare and cell_iface:
+            try:
+                from quality_http import http_suite
+                advanced["cloudflare"] = http_suite(a, out, cell_iface)
+            except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired) as e:
+                skipped.append("Cloudflare: " + str(e))
+                say("[SKIP] " + skipped[-1])
         if a.iperf_server and cell_iface:
             try:
                 advanced["throughput"] = throughput_suite(a, out, cell_iface, limits, measure)
@@ -597,7 +614,8 @@ def main():
     say("Raw ping logs and per-packet CSV files are retained locally. Redact IPs before sharing.")
     for row in rows:
         say(f"{row['label']} {row['rate_hz']} Hz: {row['measurement']} / {row['reference']}")
-    advanced_failed = (any(t.get("status") != "COMPLETE" for t in advanced.get("throughput", [])) or
+    advanced_failed = (any(t.get("status") != "COMPLETE" for t in advanced.get("cloudflare", [])) or
+                       any(t.get("status") != "COMPLETE" for t in advanced.get("throughput", [])) or
                        ("rf" in advanced and advanced["rf"].get("samples_ok", 0) == 0))
     return 130 if interrupted else (2 if skipped or advanced_failed or any(r["measurement"] != "COMPLETE" for r in rows) else 0)
 

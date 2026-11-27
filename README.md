@@ -120,7 +120,7 @@ Run on the bench, not during flight.
 sudo ./quality --mode cellular --deep
 ~~~
 
-For RF, NetBird and TCP/UDP load tests see [Network Quality](docs/NETWORK_QUALITY.md).
+For RF, Cloudflare HTTP throughput (no private server), NetBird and TCP/UDP load tests see [Network Quality](docs/NETWORK_QUALITY.md).
 
 ## Update
 

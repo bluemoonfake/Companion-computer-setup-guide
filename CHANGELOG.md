@@ -1,5 +1,10 @@
 # Changelog
 
+## Quality v0.2.2
+- Add opt-in Cloudflare HTTP upload/download and timestamped concurrent RTT measurements; no private server required.
+- Validate HTTP responses, byte counts and route snapshots; retain raw results.
+- Default 105 MB payload across three trials per direction. Hardware regression pending.
+
 ## Concise setup guides
 - Simplify README and all setup guides to command-first steps, retaining hardware photos, core commands, essential recovery and validation notes.
 - Keep installer and quality executables unchanged; detailed historical documentation remains in Git history.
