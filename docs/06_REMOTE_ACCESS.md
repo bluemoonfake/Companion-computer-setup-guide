@@ -1,21 +1,68 @@
-# 06 — Remote access, NetBird and service operations
+# 06 — NetBird and remote access
 
-For a board using RM520N-GL, install and verify [05 — RM520N-GL](05_RM520N_GL.md) first (or use another trusted uplink). NetBird is optional; direct Pixhawk Ethernet does not depend on it. Follow the official Linux installer for your deployment and review the installer before running it. Use the management URL/setup key supplied by your administrator; never add secrets or private peer addresses to the repository.
+Install NetBird using the [official Linux guide](https://docs.netbird.io/get-started/install/linux) for your deployment. Keep setup keys private and do not re-enroll a connected peer.
+
+## 1. Connect
 
 ~~~bash
 sudo systemctl enable --now netbird
-sudo netbird status
-sudo netbird status --detail
+~~~
+
+For a new self-hosted client only, replace the management URL. The key may briefly appear in local process arguments.
+
+~~~bash
+read -rs -p 'NetBird setup key: ' NB_SETUP_KEY; echo
+sudo netbird up --management-url https://netbird.example.com:443 --setup-key "$NB_SETUP_KEY"
+unset NB_SETUP_KEY
+~~~
+
+Check management, signal, overlay IP and actual peer connection type.
+
+~~~bash
+netbird status
+netbird status -d
+ip -br -4 addr
 ip -4 route
 ~~~
 
-Enroll using the deployment's official instructions. On the GCS, verify system SSH via the companion's current overlay IPv4, not the board's previous identity. NetBird SSH Server may be disabled while OpenSSH still works through the tunnel. Keep OpenSSH keys and network access policies enabled; do not open SSH to the Internet merely to troubleshoot the overlay.
+## 2. SSH
 
-Management/Signal connected and relay availability do not prove P2P connectivity or low latency. Inspect the actual peer (Direct/P2P or Relayed), test ping from the intended remote peer and confirm the companion's default route. If daemon startup fails with 209/STDOUT, see section 8 of the RM520N guide for the verified log-directory approach. Do not reset enrollment unnecessarily.
+From an authorized remote host, replace NETBIRD_IP with the companion's current overlay IPv4. Use OpenSSH and restrict TCP 22 to trusted peers.
 
-## Autostart and recovery
+~~~bash
+ping -c 10 NETBIRD_IP
+ssh ctuav@NETBIRD_IP
+~~~
 
-Install and enable only services required on that machine. These commands are diagnostic:
+## 3. Startup error 209/STDOUT
+
+Inspect the unit/logs first. If the log-directory/output configuration causes startup failure, apply this drop-in from a local console (VPN disconnects).
+
+~~~bash
+systemctl cat netbird
+sudo journalctl -u netbird -b -n 50 --no-pager
+ls -ld /var/log/netbird
+~~~
+
+~~~bash
+sudo mkdir -p /etc/systemd/system/netbird.service.d
+sudo tee /etc/systemd/system/netbird.service.d/10-startup.conf >/dev/null <<'CONF'
+[Service]
+LogsDirectory=netbird
+StandardOutput=journal
+StandardError=journal
+Restart=always
+RestartSec=5s
+CONF
+sudo systemctl daemon-reload
+sudo systemctl enable netbird
+sudo systemctl restart netbird
+netbird status
+~~~
+
+## 4. Service checks
+
+Only installed/required services should be active. Verify actual data flow after reboot.
 
 ~~~bash
 systemctl is-active NetworkManager ssh avahi-daemon
@@ -25,10 +72,4 @@ sudo journalctl -b -u ctuav-network -u netbird -u mavlink-router -u microxrce-ag
 sudo ss -lntup
 ~~~
 
-Missing optional services are not automatically errors. Do not run legacy hotspot-autostart or 4G reset services alongside ctuav-network. Inspect installed service units before disabling obsolete services; these may be present only on older machines. Manage only the relevant service, not the entire networking stack, when troubleshooting.
-
-For your own ROS application, create a separate service running as a normal user with explicit WorkingDirectory, ROS environment and verified absolute executable or wrapper that sources /opt/ros/jazzy/setup.bash and the correct workspace/install/setup.bash. Set Restart=on-failure only after validating application state and safety behavior. Do not copy an old machine-specific root autostart script or create broad passwordless sudo rules. Automatic application start is outside this base repository and must be validated per project.
-
-Use [Network Quality](NETWORK_QUALITY.md) for RTT, RF and controlled load tests, and [Validation](VALIDATION.md) for complete bench checks. Remote cellular/VPN is suitable for supervised monitoring and development when validated; do not treat it as a primary flight-control link.
-
-Reference: [NetBird Linux installation](https://docs.netbird.io/get-started/install/linux).
+Use a separate non-root service for ROS applications with the correct ROS/workspace environment. Do not expose DDS/MAVLink publicly or rely on cellular as primary flight control.

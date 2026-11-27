@@ -1,12 +1,10 @@
 # Companion Computer Setup — Ubuntu 24.04 LTS
 
-A modular setup repository for embedded Linux companion computers (Raspberry Pi 5, Orange Pi 6 and compatible Ubuntu 24.04 systems) connecting to PX4 over Ethernet. Install the OS and flight-controller middleware independently of optional cellular, Wi-Fi and NetBird. This branch implements RM520N-GL ECM networking; other modem branches retain their own historical guides.
+Ubuntu 24.04 companion computer setup for PX4: Ethernet, MAVLink Anywhere, ROS 2 Jazzy, Micro XRCE-DDS, optional 5G and NetBird.
 
 ## Hardware examples
 
-The following reference hardware illustrates the intended companion-computer platforms and optional cellular connection. The images are product photographs from the linked suppliers, not photographs of a validated integrated assembly.
-
-### Embedded companion computers
+### Companion computers
 
 <table>
   <tr>
@@ -27,9 +25,9 @@ The following reference hardware illustrates the intended companion-computer pla
   </tr>
 </table>
 
-Use the correct Ubuntu 24.04 board image and vendor BSP. For Jetson, verify the exact board's NVIDIA JetPack/L4T and Ubuntu compatibility before installation; do not flash a generic Ubuntu image or assume that this repository has been validated on Jetson. See [base system setup](docs/01_UBUNTU_24_04.md).
+Use the correct board image/BSP. Jetson requires compatible JetPack/L4T; it is a reference platform, not a validated target.
 
-### Optional 5G cellular hardware
+### 5G modem
 
 <table>
   <tr>
@@ -46,161 +44,70 @@ Use the correct Ubuntu 24.04 board image and vendor BSP. For Jetson, verify the 
   </tr>
 </table>
 
-The reference cellular setup uses the RM520N-GL on a compatible USB 3.0 adapter in CDC-ECM mode, with a data SIM, suitable power and the required antennas. The HAT form factor does not establish GPIO, carrier-board or PCIe compatibility across platforms; verify the specific adapter and use the documented USB connection. See [RM520N-GL setup](docs/05_RM520N_GL.md) and [network quality benchmark](docs/NETWORK_QUALITY.md). SIM7600 variants are documented separately in their respective branches.
+Use a compatible USB 3.0 adapter, data SIM, power supply and antennas. Photo credits: Orange Pi Vietnam, Geekworm, NVIDIA, Spotpear and Waveshare (linked originals).
 
-*Photo credits: Orange Pi Vietnam, Geekworm, NVIDIA, Spotpear and Waveshare. Images are linked to their original hosts for hardware identification; rights remain with their respective owners. Third-party image availability is outside this repository's control.*
-
-## Setup order
+## Setup
 
 | Step | Guide |
 |---|---|
-| 01 | [Ubuntu 24.04 base system, SSH, hostname, NetworkManager](docs/01_UBUNTU_24_04.md) |
-| 02 | [Dedicated Pixhawk Ethernet and static IP](docs/02_PX4_ETHERNET.md) |
-| 03 | [MAVLink Anywhere, MAVLink routing and GCS](docs/03_MAVLINK.md) |
-| 04 | [ROS 2 Jazzy, px4_msgs and Micro XRCE-DDS Agent](docs/04_ROS2_DDS.md) |
-| 05 | [RM520N-GL ECM, automatic Hotspot/Station](docs/05_RM520N_GL.md) |
-| 06 | [NetBird remote access and service operations](docs/06_REMOTE_ACCESS.md) |
-| 07 | [Network quality benchmark](docs/NETWORK_QUALITY.md) |
-| 08 | [Bench validation checklist](docs/VALIDATION.md) |
+| 01 | [Ubuntu 24.04](docs/01_UBUNTU_24_04.md) |
+| 02 | [PX4 Ethernet](docs/02_PX4_ETHERNET.md) |
+| 03 | [MAVLink Anywhere](docs/03_MAVLINK.md) |
+| 04 | [ROS 2 Jazzy and DDS](docs/04_ROS2_DDS.md) |
+| 05 | [RM520N-GL 5G and Wi-Fi](docs/05_RM520N_GL.md) |
+| 06 | [NetBird and remote access](docs/06_REMOTE_ACCESS.md) |
+| 07 | [Network quality](docs/NETWORK_QUALITY.md) |
+| 08 | [Validation checklist](docs/VALIDATION.md) |
 
-```text
-Pixhawk 192.168.0.3/24
-     | Ethernet (isolated FC subnet)
-     | MAVLink UDP 14556 -> 14600
-     | XRCE-DDS UDP -> 8888
+~~~text
+PX4 192.168.0.3/24
+  | Ethernet
+  | MAVLink UDP 14556 -> 14600
+  | XRCE-DDS UDP -> 8888
 Companion 192.168.0.2/24
-     | mavlink-router / MAVLink Anywhere -> GCS UDP 14550
-     | MicroXRCEAgent -> ROS 2 Jazzy / px4_msgs (local DDS)
-     | Optional RM520N-GL ECM / USB Wi-Fi / NetBird
-```
+  | MAVLink Anywhere -> GCS UDP 14550
+  | Micro XRCE-DDS Agent -> ROS 2 Jazzy
+  | Optional 5G / Wi-Fi / NetBird
+~~~
 
-The IP addresses and port pair reflect earlier Pi 5 bench observations. Domain 42/local discovery is a configurable companion-local profile. No hardware-wide validation is implied. The base OS, MAVLink and DDS steps are documented commands, not actions performed by config; config installs only the RM520N networking stack. No camera-specific or project-specific autostart/legacy GPIO reset scripts are required.
+## Quick start
 
-## Repository layout and versions
-
-| File | Purpose |
-|---|---|
-| [config](config) | Interactive installer v0.1.1; installs the ctuav-net CLI and watchdog |
-| [quality](quality) | Standalone quality tool v0.2.1; does not change network settings |
-| [quality_advanced.py](quality_advanced.py) | RF and controlled throughput support; keep alongside quality |
-| [Manual setup](docs/05_RM520N_GL.md) | ECM, NetBird, Wi-Fi, recovery and historical benchmarks |
-| [Network quality](docs/NETWORK_QUALITY.md) | Measurement commands, metrics and limitations |
-| [Validation checklist](docs/VALIDATION.md) | Bench acceptance and regression procedure |
-| [Changelog](CHANGELOG.md) | Installer and benchmark changes |
-
-For an already configured board, update quality with git pull --ff-only; no installer rerun or service restart is needed. Updating the installed ctuav-net executable is separate and requires rerunning config from a recovery-capable console.
-
-## Optional RM520N networking installer
-
-Run from a local console (or independent recovery link), not through the Wi-Fi adapter that will be switched.
+Clone this branch on Ubuntu 24.04. The installer configures **5G networking only**; follow steps 01–04 for PX4 middleware.
 
 ~~~bash
-git clone --branch setup/RM520N-GL --single-branch https://github.com/bluemoonfake/Companion-computer-setup-guide.git
+sudo apt install -y git
+git clone -b setup/RM520N-GL --single-branch https://github.com/bluemoonfake/Companion-computer-setup-guide.git
 cd Companion-computer-setup-guide
 sudo ./config --check
 sudo ./config
 ~~~
 
-If Git is missing: sudo apt install git. For an existing checkout, switch to the branch and pull with --ff-only before running the installer. Do not overwrite local changes.
-
-The setup wizard detects USB modem 2c7c:0801, CDC-ECM and USB Wi-Fi interfaces, checks NetworkManager/AP capability, and asks you to select cellular-only or cellular + Wi-Fi switching. It reuses the existing CTUAV_cc_5G and saved Station profile when possible. For a new Hotspot it asks for SSID (default CTUAV_cc_5G) and a WPA2 password; it does not publish credentials. Saved WPA2 credentials are passed to nmcli during profile creation and can briefly be visible to privileged/local processes; use a trusted local console.
-
-If the ECM interface is missing, the wizard offers explicit AT configuration (select a verified AT port, provide APN, confirm modem reset). Existing ECM sessions are not reset. If ModemManager owns the modem, stop and resolve it manually using the detailed guide. The wizard does not change the kernel, install a Wi-Fi driver, change the network renderer, or enroll/reset NetBird automatically. For those optional/manual steps see the detailed guide.
-
-## Hotspot dependency (v0.1.1)
-
-Ubuntu images may omit dnsmasq-base. NetworkManager requires the dnsmasq binary to provide DHCP and DNS in IPv4 shared mode. The installer now checks this before changing Wi-Fi profiles and offers installation; cellular-only mode does not require this package. The read-only check warns if it is missing. The watchdog logs nmcli activation errors instead of silently discarding them.
-
-For an existing v0.1.0 installation with AP activation failure and journal message "Could not find dnsmasq binary", run from the local console:
+Run from a local console; switching Wi-Fi can disconnect SSH. Select ECM only or ECM + automatic AP/Station.
 
 ~~~bash
-sudo systemctl stop ctuav-network.service
-sudo apt update
-sudo apt install -y dnsmasq-base
-sudo systemctl restart ctuav-network.service
-sudo ctuav-net status
-~~~
-
-To update the installed CLI and watchdog to v0.1.1, pull the branch and rerun the wizard, reusing existing profiles. No driver change is required to resolve this missing-package error.
-
-## Diagnostics and operation
-
-~~~bash
-sudo ./config --check
 sudo ctuav-net status
 sudo ctuav-net logs
-sudo ./config --version
 ~~~
 
-The status command reports real device/profile states, routes and NetBird status if installed. A diagnostic warning is not a claim that hardware failed. Redact IPs/SSID/private information before sharing output.
+## Quality test
 
-| Modem USB | USB Wi-Fi | Policy |
-|---|---|---|
-| Present | Present | AP, shared IPv4 via cellular when available |
-| Absent | Present | Station; if activation fails, sticky fallback AP |
-| Present | Absent | 5G only |
-| Absent | Absent | No change to other interfaces |
-
-USB presence is checked every 2 seconds with 3 matching observations. This is not Internet/coverage failover. A Wi-Fi adapter replacement requires rerunning setup. STA/AP activation can interrupt existing SSH sessions.
-
-The installer saves a root-only backup under /var/backups/ctuav-network before profile changes. It does not automatically restore modem NVRAM or roll back all network changes. On failure, inspect output and recover from the console:
+Run on the bench, not during flight.
 
 ~~~bash
-sudo systemctl stop ctuav-network.service
-nmcli connection show
-# Substitute the saved Station UUID:
-sudo nmcli con mod uuid UUID connection.autoconnect yes
-sudo nmcli con up uuid UUID
-~~~
-
-To resume after reviewing configuration: sudo systemctl enable --now ctuav-network.service.
-
-For manual setup, measured 5G results, NetBird, driver troubleshooting and recovery, see [RM520N-GL detailed setup](docs/05_RM520N_GL.md). Legacy camera, application autostart and GPIO reset guides were removed from this branch; prior revisions remain available in Git history. Do not run old hotspot or reset services together with this watchdog.
-
-## Network quality benchmark
-
-The standalone `quality` command measures ICMP round-trip time and packet loss without changing NetworkManager, NetBird, modem settings or the watchdog.
-
-~~~bash
-sudo ./quality --self-test
-sudo ./quality
-# Or supply the remote NetBird peer explicitly:
-sudo ./quality --netbird PEER_IPV4
-# Short smoke test:
-sudo ./quality --mode netbird --netbird PEER_IPV4 --duration 10 --rates 5,10
-# Cellular only:
-sudo ./quality --mode cellular
-# From a Linux laptop connected to the Hotspot (not on the Orange Pi itself):
-./quality --mode local --local 192.168.50.1
-~~~
-
-Replace PEER_IPV4 with a reachable remote NetBird peer address, not the device's own IP. If omitted, the interactive benchmark asks for it. Default tests are ECM gateway and direct Internet (5 Hz), then NetBird at 5/10/20/50 Hz, sequentially for 60 seconds nominal send duration each. Each test checks its IPv4 route and binds ping to the expected interface. A NetBird route does not prove its underlying transport uses 5G; verify the host uplink separately.
-
-Results are saved in a private timestamped directory under `quality-results/` (root-owned when run with sudo): raw ping logs, per-packet CSV, summary CSV and JSON. Statistics include loss, min/mean/median/P95/P99/max RTT, population mdev and mean absolute RTT change between adjacent received sequence numbers. Configurable reference defaults: mean <=100 ms, max <=150 ms, mdev <=20 ms, loss <=0%; these are engineering indicators, not flight acceptance criteria. Use `./quality --help` to change duration, rates, output path and limits. A complete measurement can be outside the reference; invalid or skipped measurements exit 2, while a completed benchmark with poor performance is still a valid measurement. Avoid tests during flight.
-
-For a detailed procedure and limitations see [Network quality benchmark](docs/NETWORK_QUALITY.md).
-
-## Advanced 5G benchmark (quality v0.2.1)
-
-~~~bash
-# Deep ICMP only: gateway, two Internet destinations, payload sweep and soak.
+./quality --self-test
 sudo ./quality --mode cellular --deep
-# Short deep smoke test:
-sudo ./quality --mode cellular --deep --duration 10 --soak-duration 30
-# Optional RF sampling throughout the tests (verified free AT port):
-sudo apt install python3-serial psmisc
-sudo ./quality --mode cellular --deep --rf-port /dev/ttyUSB2
-# Optional controlled load tests; use a server you own or have permission to test:
-sudo apt install iperf3
-sudo ./quality --mode cellular --deep --iperf-server SERVER_IPV4 --rf-port /dev/ttyUSB2
 ~~~
 
-On the remote authorized host run `iperf3 -s` and restrict access to trusted clients. The client tests TCP both directions (default paced cap 10 Mbps), UDP 1/3/5 Mbps both directions, and concurrent ICMP RTT. Tests consume mobile data and must not run during flight. No public test server is selected automatically. RF is opt-in and uses read-only AT commands; close minicom first. See [advanced benchmark documentation](docs/NETWORK_QUALITY.md#advanced-benchmark-v02x).
+For RF, NetBird and TCP/UDP load tests see [Network Quality](docs/NETWORK_QUALITY.md).
 
-Progress is printed every five seconds during ping. Invalid measurements report actual transmit/receive/parser counts. The fixed-count ping no longer combines -c with a deadline; an external watchdog bounds execution. Raw logs are retained.
+## Update
 
-## Validation
+~~~bash
+git pull --ff-only
+./config --version
+./quality --version
+~~~
 
-Network installer v0.1.1 is an initial installer implementation, not a hardware-qualified release. The earlier manual ECM/AP/STA configurations were tested on Orange Pi 6. On-device v0.1.0 validation confirmed ECM, existing Station profile reuse, Hotspot activation after installing dnsmasq-base, and active/enabled watchdog. Automated dependency installation in v0.1.1, automatic AT path, bidirectional switching, fallback AP, reboot and the new quality tool still require validation. Do not use it as a safety-critical control link.
+No installer rerun is needed for documentation or quality updates. To update the installed watchdog, rerun config from a local console.
 
-CLI workflow inspired by [MAVLink Anywhere](https://github.com/alireza787b/mavlink-anywhere); this is an independent implementation, not a dependency on that project.
+[Changelog](CHANGELOG.md) · [Validation status](docs/VALIDATION.md)

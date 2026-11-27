@@ -1,5 +1,9 @@
 # Changelog
 
+## Concise setup guides
+- Simplify README and all setup guides to command-first steps, retaining hardware photos, core commands, essential recovery and validation notes.
+- Keep installer and quality executables unchanged; detailed historical documentation remains in Git history.
+
 ## Ubuntu 24.04 documentation restructure
 - Replace legacy numbered guides with a modular docs/ setup sequence.
 - Add base Ubuntu, static PX4 Ethernet, MAVLink Anywhere, ROS 2 Jazzy and Micro XRCE-DDS instructions; separate recovered bench observations from new documentation.
