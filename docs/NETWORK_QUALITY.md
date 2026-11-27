@@ -67,8 +67,33 @@ If the AT port is free, optionally use minicom on the verified RM520N AT port an
 
 Check NetBird peer connection type (P2P or Relayed) and underlying uplink separately. Sequential rate tests do not establish that packet frequency caused any latency change. Repeat under comparable conditions and include long-duration tests for qualification.
 
-This tool does not measure one-way delay, UDP application loss, available throughput, or camera/video end-to-end latency. TCP/UDP iperf3 requires an explicitly controlled reachable server and is intentionally outside the default benchmark. Do not infer flight-control suitability from ICMP results.
+The default ICMP benchmark does not measure one-way delay, UDP application loss, available throughput, or camera/video end-to-end latency. Optional iperf3 is described below and requires an explicitly controlled reachable server. Do not infer flight-control suitability from ICMP results.
 
 ## Validation status
 
 The original manual benchmark used 5, 10, 20 and 50 Hz with 60-second nominal test windows. This script automates that method and adds per-packet analysis. The new implementation must be checked on the actual target hardware; do not confuse previous manual results with results produced by this tool.
+
+
+## Advanced benchmark v0.2.0
+
+The optional --deep profile adds a second public Internet target (default 8.8.8.8), ICMP payloads 512/1200/1400 bytes and a 600-second soak (configurable --soak-duration 10..1800). The payload sweep allows fragmentation by default and is not PMTU discovery. All tests use the verified cellular route; high latency may be caused by remote ICMP handling as well as radio/network conditions.
+
+Progress shows unique replies, highest received sequence and most recent RTT, not actual transmitted count. Final summary reports actual transmitted/received counts. The longest consecutive missing sequence count and loss bursts describe loss in the test stream, not exact outage duration. Ten-second nominal sequence windows are exported for complete tests, plus P95 absolute adjacent RTT delta and fraction of replies above 150 ms. Incomplete tests remain INVALID.
+
+### Optional RF monitoring
+
+Install python3-serial and psmisc. Close minicom and other AT applications, then use --rf-port /dev/ttyUSB2 only after checking the port belongs to RM520N. The tool checks USB ID and port occupancy, opens the port exclusively, verifies ATI and logs read-only AT+QENG="servingcell" and AT+QCSQ at nominal five-second intervals (configurable --rf-interval). No band locks, APN changes, resets or scan commands. AT sampling cannot guarantee continuous observation of cell state.
+
+rf.csv and rf-raw.jsonl contain UTC timestamps, state, RAT, LTE/NR band, channel, PCI, signal metrics and raw data. LTE SINR is deliberately recorded as raw rather than converted; NR5G-NSA and SA use documented field order. Missing/invalid readings must not be interpreted as zero signal. Observed cell-signature changes are not necessarily handovers (NSA secondary-cell release/addition can change the signature). Raw cell data is private location-related information: redact before sharing.
+
+Reference: [Quectel RG520N/RM5x0N AT Commands Manual V1.1](https://www.quectel.com/content/uploads/2025/09/Quectel_RG520NRG525FRG5x0FRM5x0N_Series_AT_Commands_Manual_V1.1.pdf), QENG serving-cell response.
+
+### Optional throughput and loaded latency
+
+Use iperf3 on a controlled server you own or have permission to test. Run iperf3 -s on it; firewall the test port to trusted clients. The Orange Pi must route to the server through the RM520N ECM interface. The client refuses an unexpected route or iperf3 without --bind-dev. It runs TCP upload/download with configurable pacing cap (--tcp-mbps, default 10) and UDP upload/download at --udp-mbps 1,3,5, with --load-duration 30 nominal seconds for concurrent ping. Each iperf session runs five seconds longer than the requested ping window. --iperf-port defaults to 5201.
+
+Each load trial stores native iperf JSON, sender/receiver summaries, UDP loss and jitter if supplied by iperf, TCP retransmissions if present, route snapshots and concurrent latency. The loaded ping is started shortly after launching iperf; timestamps and iperf intervals are retained, but overlap and saturation are not guaranteed. Compare with the unloaded cellular-internet measurement at the same target; do not claim a causal bufferbloat grade without verifying overlap and offered/achieved rate. TCP pacing cap is not a maximum-capacity test. The offered UDP bitrate is not achieved bitrate.
+
+Reference: [ESnet iperf3 documentation](https://software.es.net/iperf/invoking.html). Load tests consume mobile data and require explicit --iperf-server; no external server is contacted automatically. No configuration changes are made. Do not test during critical operations.
+
+v0.2.0 is not yet validated on target hardware. Run the offline self-test and short smoke test before long tests.

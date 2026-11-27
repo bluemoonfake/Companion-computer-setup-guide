@@ -92,6 +92,25 @@ Results are saved in a private timestamped directory under `quality-results/` (r
 
 For a detailed procedure and limitations see [Network quality benchmark](docs/NETWORK_QUALITY.md).
 
+## Advanced 5G benchmark (quality v0.2.0)
+
+~~~bash
+# Deep ICMP only: gateway, two Internet destinations, payload sweep and soak.
+sudo ./quality --mode cellular --deep
+# Short deep smoke test:
+sudo ./quality --mode cellular --deep --duration 10 --soak-duration 30
+# Optional RF sampling throughout the tests (verified free AT port):
+sudo apt install python3-serial psmisc
+sudo ./quality --mode cellular --deep --rf-port /dev/ttyUSB2
+# Optional controlled load tests; use a server you own or have permission to test:
+sudo apt install iperf3
+sudo ./quality --mode cellular --deep --iperf-server SERVER_IPV4 --rf-port /dev/ttyUSB2
+~~~
+
+On the remote authorized host run `iperf3 -s` and restrict access to trusted clients. The client tests TCP both directions (default paced cap 10 Mbps), UDP 1/3/5 Mbps both directions, and concurrent ICMP RTT. Tests consume mobile data and must not run during flight. No public test server is selected automatically. RF is opt-in and uses read-only AT commands; close minicom first. See [advanced benchmark documentation](docs/NETWORK_QUALITY.md#advanced-benchmark-v020).
+
+Progress is printed every five seconds during ping. Invalid measurements report actual transmit/receive/parser counts. The fixed-count ping no longer combines -c with a deadline; an external watchdog bounds execution. Raw logs are retained.
+
 ## Validation
 
 Version 0.1.1 is an initial installer implementation, not a hardware-qualified release. The earlier manual ECM/AP/STA configurations were tested on Orange Pi 6. On-device v0.1.0 validation confirmed ECM, existing Station profile reuse, Hotspot activation after installing dnsmasq-base, and active/enabled watchdog. Automated dependency installation in v0.1.1, automatic AT path, bidirectional switching, fallback AP, reboot and the new quality tool still require validation. Do not use it as a safety-critical control link.

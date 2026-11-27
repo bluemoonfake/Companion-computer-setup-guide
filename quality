@@ -15,8 +15,11 @@ import subprocess
 import sys
 import tempfile
 import time
+import threading
+import queue
+import signal
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 ENV = dict(os.environ, LC_ALL="C")
 MODEM = ("2c7c", "0801")
 REPLY = re.compile(r"\bicmp_seq=(\d+)\b.*?\btime([=<])\s*([\d.]+)\s*ms")
@@ -25,7 +28,8 @@ RTT = re.compile(r"(?:rtt|round-trip) min/avg/max/(?:mdev|stddev) = ([\d.]+)/([\
 FIELDS = ["label", "target", "interface", "rate_hz", "requested_packets", "transmitted",
           "received", "loss_pct", "min_ms", "mean_ms", "median_ms", "p95_ms",
           "p99_ms", "max_ms", "mdev_ms", "mean_abs_rtt_delta_ms", "duplicates",
-          "bounded_rtt_samples", "elapsed_s", "measurement", "reference", "reason"]
+          "bounded_rtt_samples", "payload_bytes", "loss_bursts", "max_consecutive_loss",
+          "p95_abs_rtt_delta_ms", "rtt_over_150_pct", "elapsed_s", "measurement", "reference", "reason"]
 
 
 def say(message):
@@ -135,7 +139,22 @@ def metrics(replies, tx, rx):
     seqs = sorted(replies)
     delta = [abs(replies[b][0] - replies[a][0])
              for a, b in zip(seqs, seqs[1:]) if b == a + 1]
+    runs = []
+    if tx is not None:
+        streak = 0
+        for seq in range(1, tx+1):
+            if seq not in replies:
+                streak += 1
+            elif streak:
+                runs.append(streak)
+                streak = 0
+        if streak:
+            runs.append(streak)
     return {
+        "loss_bursts": len(runs),
+        "max_consecutive_loss": max(runs, default=0),
+        "p95_abs_rtt_delta_ms": percentile(delta, .95),
+        "rtt_over_150_pct": 100 * sum(v > 150 for v in x) / len(x) if x else None,
         "loss_pct": 100 * (tx - rx) / tx if tx and rx is not None else None,
         "min_ms": min(x) if x else None,
         "mean_ms": statistics.mean(x) if x else None,
@@ -170,11 +189,79 @@ def empty_row(label, target, iface, hz, count):
     return row
 
 
-def measure(out, label, target, iface, hz, duration, limits):
+def stream_ping(args, duration):
+    """Stream progress, retain full output, and request ping summary on hard timeout."""
+    lines = []
+    events = queue.Queue()
+    start = time.monotonic()
+    proc = subprocess.Popen(args, env=ENV, text=True, stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, bufsize=1)
+    def read():
+        try:
+            for line in proc.stdout:
+                events.put(line)
+        finally:
+            events.put(None)
+    worker = threading.Thread(target=read, daemon=True)
+    worker.start()
+    replies = {}
+    last = None
+    last_seq = 0
+    next_progress = start + 5
+    timed_out = False
+    end = start + duration + 60
+    try:
+        while True:
+            now = time.monotonic()
+            if now >= end and not timed_out:
+                timed_out = True
+                if proc.poll() is None:
+                    proc.send_signal(signal.SIGINT)
+                end = now + 5
+            elif now >= end and timed_out:
+                if proc.poll() is None:
+                    proc.kill()
+                break
+            try:
+                line = events.get(timeout=0.5)
+            except queue.Empty:
+                line = ""
+            if line is None:
+                break
+            if line:
+                lines.append(line)
+                m = REPLY.search(line)
+                if m:
+                    seq = int(m[1])
+                    if seq not in replies:
+                        replies[seq] = float(m[3])
+                    last = float(m[3])
+                    last_seq = max(last_seq, seq)
+            now = time.monotonic()
+            if now >= next_progress:
+                last_text = "-" if last is None else f"{last:.3f} ms"
+                say(f"[PROGRESS] {now-start:.0f}s/{duration}s nominal | unique replies={len(replies)} | highest reply seq={last_seq} | last RTT={last_text}")
+                next_progress = now + 5
+        proc.wait(timeout=5)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+        worker.join(timeout=2)
+        while not events.empty():
+            line = events.get_nowait()
+            if line is not None:
+                lines.append(line)
+        proc.stdout.close()
+    return "".join(lines), "", proc.returncode, timed_out
+
+
+def measure(out, label, target, iface, hz, duration, limits, payload=56):
     count = hz * duration
     name = f"{label}-{hz}hz"
     row = empty_row(label, target, iface, hz, count)
-    say(f"\n[TEST] {label}: {target} via {iface}, {hz} Hz, {count} packets")
+    row["payload_bytes"] = payload
+    say(f"\n[TEST] {label}: {target} via {iface}, {hz} Hz, {count} packets, {payload} B payload")
     try:
         before = route(target)
         if before.get("dev") != iface:
@@ -186,18 +273,14 @@ def measure(out, label, target, iface, hz, duration, limits):
         say("[INVALID] " + row["reason"])
         return row
     args = ["ping", "-4", "-n", "-D", "-I", iface, "-i", f"{1/hz:.6f}",
-            "-c", str(count), "-W", "5", "-w", str(duration + 15), target]
+            "-c", str(count), "-W", "5", "-s", str(payload), target]
     start = time.monotonic()
     began = dt.datetime.now(dt.timezone.utc).isoformat()
     timed_out = False
     try:
-        proc = cmd(*args, timeout=duration + 25)
-        stdout, stderr, rc = proc.stdout, proc.stderr, proc.returncode
-    except subprocess.TimeoutExpired as e:
-        def decode(x):
-            return x.decode(errors="replace") if isinstance(x, bytes) else (x or "")
-        stdout, stderr, rc = decode(e.stdout), decode(e.stderr), None
-        timed_out = True
+        stdout, stderr, rc, timed_out = stream_ping(args, duration)
+    except subprocess.TimeoutExpired:
+        stdout, stderr, rc, timed_out = "", "ping process cleanup timeout", None, True
     except OSError as e:
         stdout, stderr, rc = "", str(e), None
     elapsed = time.monotonic() - start
@@ -211,9 +294,9 @@ def measure(out, label, target, iface, hz, duration, limits):
     if rc not in (0, 1):
         errors.append(f"ping exit={rc}")
     if tx != count:
-        errors.append("missing or incomplete transmit count")
+        errors.append(f"transmit count: requested={count}, actual={tx}")
     if rx is None or rx != len(replies) or any(not 1 <= seq <= count for seq in replies):
-        errors.append("reply parser/summary mismatch")
+        errors.append(f"reply mismatch: ping summary={rx}, parsed unique={len(replies)}")
     if tx is not None and rx is not None and not 0 <= rx <= tx:
         errors.append("invalid packet totals")
     try:
@@ -238,6 +321,16 @@ def measure(out, label, target, iface, hz, duration, limits):
                 w.writerow([seq, "reply", val, int(bound)])
             else:
                 w.writerow([seq, "no_reply" if not errors else "unknown", "", ""])
+    if not errors:
+        with (out / f"{name}-windows.csv").open("w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["first_seq", "last_seq", "nominal_start_s", "sent", "received", "loss_pct", "p95_ms", "max_ms"])
+            for first in range(1, count+1, hz*10):
+                last_seq = min(count, first+hz*10-1)
+                vals = [replies[i][0] for i in range(first, last_seq+1) if i in replies]
+                n = last_seq-first+1
+                w.writerow([first, last_seq, (first-1)/hz, n, len(vals),
+                            100*(n-len(vals))/n, percentile(vals,.95), max(vals) if vals else ""])
     write_json(out / f"{name}-meta.json", {
         "started_utc": began, "command": args, "route_before": before,
         "route_after": after, "ping_exit": rc,
@@ -246,6 +339,7 @@ def measure(out, label, target, iface, hz, duration, limits):
     })
     if errors:
         say("[INVALID] " + row["reason"])
+        say(f"[RAW] {out / (name + chr(46) + 'txt')}")
     else:
         fmt = lambda v: "-" if v is None else f"{v:.3f}"
         say(f"[COMPLETE] loss={fmt(row['loss_pct'])}% avg={fmt(row['mean_ms'])} ms "
@@ -314,6 +408,16 @@ def main():
     p.add_argument("--local", type=ipv4, metavar="REMOTE_IP", help="remote LAN/AP endpoint (use a client laptop to test the AP gateway)")
     p.add_argument("--cell-iface", help="select among detected RM520N CDC-ECM interfaces")
     p.add_argument("--internet", type=ipv4, default="1.1.1.1")
+    p.add_argument("--deep", action="store_true", help="additional cellular multi-target, size and soak tests")
+    p.add_argument("--soak-duration", type=int, default=600, help="deep soak test duration (10..1800 s)")
+    p.add_argument("--secondary-internet", type=ipv4, default="8.8.8.8")
+    p.add_argument("--rf-port", help="optional verified/free RM520N AT port, e.g. /dev/ttyUSB2")
+    p.add_argument("--rf-interval", type=int, default=5, help="seconds between RF samples (2..60)")
+    p.add_argument("--iperf-server", type=ipv4, help="optional explicitly authorized IPv4 iperf3 server on cellular route")
+    p.add_argument("--iperf-port", type=int, default=5201)
+    p.add_argument("--load-duration", type=int, default=30, help="iperf/loaded RTT nominal duration (10..120 s)")
+    p.add_argument("--tcp-mbps", type=int, default=10, help="TCP pacing cap per direction (1..100 Mbps)")
+    p.add_argument("--udp-mbps", type=rates_arg, default=[1,3,5], help="UDP offered load ladder, Mbps (1..50)")
     p.add_argument("--duration", type=int, default=60, help="nominal send duration per test, seconds (1..600)")
     p.add_argument("--rates", type=rates_arg, default=[5, 10, 20, 50], help="NetBird rates in Hz")
     p.add_argument("--baseline-rate", type=int, default=5, help="gateway/internet/local rate in Hz")
@@ -327,6 +431,16 @@ def main():
         return self_test()
     if not 1 <= a.duration <= 600 or not 1 <= a.baseline_rate <= 50:
         p.error("duration must be 1..600 s and baseline rate 1..50 Hz")
+    if not 10 <= a.soak_duration <= 1800 or not 2 <= a.rf_interval <= 60:
+        p.error("soak duration 10..1800 s; RF interval 2..60 s")
+    if not 10 <= a.load_duration <= 120 or not 1 <= a.iperf_port <= 65535 or not 1 <= a.tcp_mbps <= 100:
+        p.error("load duration 10..120 s; iperf port 1..65535; TCP cap 1..100 Mbps")
+    if a.deep and a.mode not in ("all", "cellular"):
+        p.error("--deep requires cellular or all mode")
+    if (a.iperf_server or a.rf_port) and a.mode not in ("all", "cellular"):
+        p.error("optional RF/iperf tests require cellular or all mode")
+    if (a.iperf_server or a.rf_port) and os.geteuid() != 0:
+        p.error("Use sudo for RF or interface-bound throughput tests")
     limits = dict(mean=a.mean_limit, max=a.max_limit, mdev=a.mdev_limit, loss=a.loss_limit)
     if any(not math.isfinite(x) or x < 0 for x in limits.values()) or limits["loss"] > 100:
         p.error("reference limits must be finite and nonnegative; loss <= 100")
@@ -334,6 +448,8 @@ def main():
         p.error("Missing dependencies: install iputils-ping and iproute2.")
     plan = []
     skipped = []
+    cell_iface = None
+    custom = {}
     if a.mode in ("all", "cellular"):
         cells = ecm_interfaces()
         iface = a.cell_iface or (cells[0] if len(cells) == 1 else None)
@@ -349,7 +465,17 @@ def main():
                     skipped.append("ECM gateway: no unique IPv4 default gateway.")
             except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as e:
                 skipped.append("ECM gateway: " + str(e))
+            cell_iface = iface
             plan.append(("cellular-internet", a.internet, iface, a.baseline_rate))
+            if a.deep:
+                if a.secondary_internet != a.internet:
+                    plan.append(("cellular-secondary", a.secondary_internet, iface, a.baseline_rate))
+                for size in (512, 1200, 1400):
+                    label = f"cellular-size-{size}"
+                    plan.append((label, a.internet, iface, a.baseline_rate))
+                    custom[label] = (a.duration, size)
+                plan.append(("cellular-soak", a.internet, iface, a.baseline_rate))
+                custom["cellular-soak"] = (a.soak_duration, 56)
     if a.mode in ("all", "netbird"):
         peer = a.netbird
         if not peer and sys.stdin.isatty():
@@ -373,6 +499,10 @@ def main():
             plan.append(("local", a.local, iface, a.baseline_rate))
         except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as e:
             skipped.append("Local: " + str(e))
+    if a.iperf_server and not cell_iface:
+        skipped.append("Throughput: no verified cellular interface")
+    if a.rf_port and not cell_iface:
+        skipped.append("RF: no verified cellular interface")
     for reason in skipped:
         say("[SKIP] " + reason)
     if not plan:
@@ -383,27 +513,47 @@ def main():
     a.output.mkdir(parents=True, exist_ok=True)
     out = Path(tempfile.mkdtemp(prefix=dt.datetime.now().strftime("%Y%m%d-%H%M%S-"), dir=a.output))
     say(f"CTUAV Network Quality v{VERSION} | output: {out}")
-    say("Sequential ICMP tests only; do not run during flight or critical operations.")
+    say("Sequential ICMP tests; optional explicitly requested RF/throughput tests. Bench only.")
     say("Reference limits are configurable engineering indicators, NOT flight acceptance criteria.")
     rows = []
     interrupted = False
+    advanced = {}
+    sampler = None
+    from quality_advanced import RFSampler, throughput_suite
     try:
+        if a.rf_port and cell_iface:
+            try:
+                sampler = RFSampler(a.rf_port, a.rf_interval, out)
+                sampler.start()
+                say("[INFO] RF sampling started (read-only AT commands)")
+            except (OSError, RuntimeError, ImportError, ValueError) as e:
+                skipped.append("RF: " + str(e))
+                say("[SKIP] " + skipped[-1])
         for label, target, iface, hz in plan:
-            rows.append(measure(out, label, target, iface, hz, a.duration, limits))
+            duration, payload = custom.get(label, (a.duration, 56))
+            rows.append(measure(out, label, target, iface, hz, duration, limits, payload))
             # Keep completed results if the next test is interrupted.
             with (out / "summary.csv").open("w", newline="") as f:
                 w = csv.DictWriter(f, fieldnames=FIELDS)
                 w.writeheader()
                 w.writerows(rows)
+        if a.iperf_server and cell_iface:
+            try:
+                advanced["throughput"] = throughput_suite(a, out, cell_iface, limits, measure)
+            except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired) as e:
+                skipped.append("Throughput: " + str(e))
+                say("[SKIP] " + skipped[-1])
     except KeyboardInterrupt:
         interrupted = True
         say("\n[WARN] Interrupted; keeping previously completed tests.")
     finally:
+        if sampler is not None:
+            advanced["rf"] = sampler.finish()
         write_json(out / "summary.json", {
             "tool_version": VERSION, "reference_limits": limits,
             "nominal_duration_s": a.duration, "interrupted": interrupted,
-            "planned_tests": len(plan), "skipped": skipped, "tests": rows,
-            "notes": ["ICMP RTT only; no one-way latency, throughput or video measurement.",
+            "planned_tests": len(plan), "skipped": skipped, "tests": rows, "advanced": advanced,
+            "notes": ["ICMP measures RTT; optional throughput results in advanced. No one-way or video latency measurement.",
                       "mdev is population standard deviation of unique received RTTs.",
                       "P95/P99 use linear interpolation; missing replies excluded.",
                       "RTT upper bounds are counted using their displayed bound.",
@@ -414,7 +564,9 @@ def main():
         })
     say(f"\nResults: {out}/summary.csv and summary.json")
     say("Raw ping logs and per-packet CSV files are retained locally. Redact IPs before sharing.")
-    return 130 if interrupted else (2 if skipped or any(r["measurement"] != "COMPLETE" for r in rows) else 0)
+    advanced_failed = (any(t.get("status") != "COMPLETE" for t in advanced.get("throughput", [])) or
+                       ("rf" in advanced and advanced["rf"].get("samples_ok", 0) == 0))
+    return 130 if interrupted else (2 if skipped or advanced_failed or any(r["measurement"] != "COMPLETE" for r in rows) else 0)
 
 
 if __name__ == "__main__":
