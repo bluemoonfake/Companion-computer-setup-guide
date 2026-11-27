@@ -138,7 +138,7 @@ sudo ss -lunp | grep ':8888'
 sudoedit /etc/systemd/system/microxrce-agent.service
 ~~~
 
-Use the actual non-root account and binary path in the unit below.
+Replace YOUR_USERNAME with your existing non-root account and verify the binary path. The service uses that user's primary group by default.
 
 ~~~ini
 [Unit]
@@ -147,8 +147,7 @@ After=network.target
 
 [Service]
 Type=simple
-User=ctuav
-Group=ctuav
+User=YOUR_USERNAME
 Environment=ROS_DOMAIN_ID=42
 Environment=ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST
 ExecStart=/usr/local/bin/MicroXRCEAgent udp4 -p 8888 -v 4
