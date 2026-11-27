@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+# Interactive SIM7600 QMI setup. No USB-mode changes or automatic modem resets.
+set -euo pipefail
+VERSION="0.1.0-qmi"
+MODEL="SIM7600NA-H"
+die() { echo "[FAIL] $*" >&2; exit 1; }
+status() {
+    echo "CTUAV $MODEL network $VERSION"
+    if command -v nmcli >/dev/null; then
+        nmcli device status || true
+        nmcli -f NAME,UUID,TYPE,DEVICE,AUTOCONNECT connection show || true
+    else echo "[WARN] NetworkManager not installed"; fi
+    if command -v mmcli >/dev/null; then mmcli -L || true; else echo "[WARN] ModemManager not installed"; fi
+    lsusb -t || true
+    ip -4 route || true
+    if command -v netbird >/dev/null; then netbird status || true; fi
+}
+case "${1:-}" in
+    --version) echo "$VERSION"; exit 0 ;;
+    --check|--status|check|status) status; exit 0 ;;
+    --logs|logs) journalctl -u ModemManager -u NetworkManager -b -n 80 --no-pager; exit ;;
+    --help|-h) echo "sudo ./config [--check|--status|--logs|--version]"; exit 0 ;;
+    ""|setup) ;;
+    *) die "Unknown option; use --help" ;;
+esac
+[[ $EUID == 0 && -t 0 ]] || die "Run sudo ./config from an interactive local console"
+. /etc/os-release
+[[ "$ID" == ubuntu && "$VERSION_ID" == 24.04 ]] || die "Expected Ubuntu 24.04"
+read -r -p "I have local console/recovery access; continue [y/N]: " confirm
+[[ "$confirm" =~ ^[Yy]$ ]] || die "Cancelled"
+read -r -p "Install/check QMI dependencies and start NetworkManager/ModemManager [y/N]: " confirm
+[[ "$confirm" =~ ^[Yy]$ ]] || die "Cancelled"
+apt-get update
+apt-get install -y network-manager modemmanager usbutils iproute2 iputils-ping dnsmasq-base
+systemctl enable --now NetworkManager ModemManager
+status
+mapfile -t ids < <(mmcli -L | sed -n 's@.*\/Modem/\([0-9][0-9]*\).*@\1@p')
+[[ ${#ids[@]} == 1 ]] || die "Connect exactly one modem and verify mmcli -L"
+info=$(mmcli -m "${ids[0]}" -K)
+grep -Ei '^modem.generic.model[[:space:]]*:' <<< "$info" || true
+grep -qi 'SIM7600' <<< "$(grep -Ei '^modem.generic.model[[:space:]]*:' <<< "$info")" || die "Modem not identified as SIM7600"
+grep -qi 'qmi_wwan' <<< "$info" || die "QMI driver not reported; verify USB mode first"
+read -r -p "Confirm physical module is $MODEL [y/N]: " confirm
+[[ "$confirm" =~ ^[Yy]$ ]] || die "Wrong branch or cancelled"
+umask 077
+backup=$(mktemp -d /var/backups/ctuav-qmi-XXXXXXXX)
+if [[ -d /etc/NetworkManager/system-connections ]]; then
+    cp -a /etc/NetworkManager/system-connections "$backup/"
+fi
+echo "[OK] Root-only backup: $backup (may contain credentials)"
+trap 'echo "[FAIL] Review journal and backup: $backup" >&2' ERR
+nmcli -f NAME,TYPE,DEVICE connection show
+read -r -p "GSM profile name [SIM7600_4G]: " profile
+profile=${profile:-SIM7600_4G}
+if nmcli con show "$profile" >/dev/null 2>&1; then
+    [[ "$(nmcli -g connection.type con show "$profile")" == gsm ]] || die "Existing profile is not GSM"
+    read -r -p "APN (Enter to retain existing): " apn
+    if [[ -n "$apn" ]]; then nmcli con mod "$profile" gsm.apn "$apn"; fi
+else
+    read -r -p "Carrier APN: " apn
+    [[ -n "$apn" ]] || die "APN required"
+    nmcli con add type gsm ifname '*' con-name "$profile" apn "$apn"
+fi
+nmcli con mod "$profile" connection.autoconnect yes ipv4.route-metric 700 ipv6.route-metric 700
+nmcli -w 90 con up "$profile"
+read -r -p "Configure auto-start Wi-Fi Hotspot too [y/N]: " confirm
+if [[ "$confirm" =~ ^[Yy]$ ]]; then
+    nmcli device status
+    read -r -p "Wi-Fi interface (e.g. wlan0): " wifi
+    [[ "$(nmcli -g WIFI-PROPERTIES.AP device show "$wifi")" == yes ]] || die "AP not supported"
+    ip -4 route
+    read -r -p "192.168.50.0/24 does not overlap existing networks [y/N]: " confirm
+    [[ "$confirm" =~ ^[Yy]$ ]] || die "Choose a non-overlapping subnet manually"
+    read -r -p "Hotspot profile [SIM7600_Hotspot]: " hot
+    hot=${hot:-SIM7600_Hotspot}
+    if nmcli con show "$hot" >/dev/null 2>&1; then
+        [[ "$(nmcli -g 802-11-wireless.mode con show "$hot")" == ap ]] || die "Not an AP profile"
+    else
+        read -r -p "SSID [SIM7600-Companion]: " ssid
+        ssid=${ssid:-SIM7600-Companion}
+        read -rs -p "WPA2 password (8-63 chars): " psk; echo
+        [[ ${#psk} -ge 8 && ${#psk} -le 63 ]] || die "Invalid password length"
+        nmcli con add type wifi ifname "$wifi" con-name "$hot" ssid "$ssid" connection.autoconnect no
+        nmcli con mod "$hot" wifi.mode ap wifi.band bg wifi-sec.key-mgmt wpa-psk wifi-sec.psk "$psk"
+        unset psk
+    fi
+    nmcli con mod "$hot" connection.interface-name "$wifi" wifi.mode ap \
+        ipv4.method shared ipv4.addresses 192.168.50.1/24 ipv6.method disabled \
+        connection.autoconnect yes connection.autoconnect-priority 100
+    nmcli -w 35 con up "$hot" ifname "$wifi"
+fi
+status
+echo "[OK] Profiles configured; verify Internet, DHCP and reboot from console."
