@@ -46,6 +46,39 @@ Use the correct board image/BSP. Jetson requires compatible JetPack/L4T; it is a
 
 Use a compatible USB 3.0 adapter, data SIM, power supply and antennas. Photo credits: Orange Pi Vietnam, Geekworm, NVIDIA, Spotpear and Waveshare (linked originals).
 
+## System architecture
+
+```mermaid
+flowchart TB
+    FC["Pixhawk / PX4<br/>192.168.0.3"]
+
+    subgraph CC["Companion computer · Ubuntu 24.04 · 192.168.0.2"]
+        MAV["MAVLink Anywhere<br/>mavlink-router"]
+        DDS["Micro XRCE-DDS Agent"]
+        ROS["ROS 2 Jazzy"]
+        VPN["NetBird · wt0"]
+        WIFI["Wi-Fi AP / Station"]
+        DDS <--> ROS
+        MAV <-->|UDP 14550| VPN
+        MAV <-.->|Optional UDP 14550| WIFI
+    end
+
+    FC <-->|Ethernet · MAVLink<br/>14556 → 14600| MAV
+    FC <-->|Ethernet · DDS<br/>UDP 8888| DDS
+    VPN <-->|USB · CDC-ECM| MODEM["RM520N-GL · 5G"]
+    MODEM <--> WAN["Carrier / Internet"]
+    WAN <-->|NetBird tunnel| REMOTE["Remote GCS<br/>NetBird peer"]
+    WIFI <-.-> LOCAL["Local GCS / SSH client"]
+
+    classDef default stroke-width:1px,font-size:12px;
+    style CC stroke-width:1px,stroke-dasharray:4 3
+    linkStyle default stroke-width:1px
+```
+
+MAVLink and XRCE-DDS share one dedicated Ethernet link but use separate UDP ports. Remote GCS traffic follows the optional cellular/NetBird path; local GCS requires a configured router endpoint.
+
+USB modem present → Hotspot (192.168.50.1/24); absent → Station, with fallback AP if Station fails.
+
 ## Setup
 
 | Step | Guide |
@@ -58,17 +91,6 @@ Use a compatible USB 3.0 adapter, data SIM, power supply and antennas. Photo cre
 | 06 | [NetBird and remote access](docs/06_REMOTE_ACCESS.md) |
 | 07 | [Network quality](docs/NETWORK_QUALITY.md) |
 | 08 | [Validation checklist](docs/VALIDATION.md) |
-
-~~~text
-PX4 192.168.0.3/24
-  | Ethernet
-  | MAVLink UDP 14556 -> 14600
-  | XRCE-DDS UDP -> 8888
-Companion 192.168.0.2/24
-  | MAVLink Anywhere -> GCS UDP 14550
-  | Micro XRCE-DDS Agent -> ROS 2 Jazzy
-  | Optional 5G / Wi-Fi / NetBird
-~~~
 
 ## Quick start
 
