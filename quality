@@ -1,0 +1,425 @@
+#!/usr/bin/env python3
+"""Measure IPv4 ICMP RTT/loss over RM520N ECM, NetBird and a local link."""
+import argparse
+import csv
+import datetime as dt
+import ipaddress
+import json
+import math
+import os
+from pathlib import Path
+import re
+import shutil
+import statistics
+import subprocess
+import sys
+import tempfile
+import time
+
+VERSION = "0.1.0"
+ENV = dict(os.environ, LC_ALL="C")
+MODEM = ("2c7c", "0801")
+REPLY = re.compile(r"\bicmp_seq=(\d+)\b.*?\btime([=<])\s*([\d.]+)\s*ms")
+TOTAL = re.compile(r"(\d+) packets transmitted,\s*(\d+) (?:packets )?received")
+RTT = re.compile(r"(?:rtt|round-trip) min/avg/max/(?:mdev|stddev) = ([\d.]+)/([\d.]+)/([\d.]+)/([\d.]+) ms")
+FIELDS = ["label", "target", "interface", "rate_hz", "requested_packets", "transmitted",
+          "received", "loss_pct", "min_ms", "mean_ms", "median_ms", "p95_ms",
+          "p99_ms", "max_ms", "mdev_ms", "mean_abs_rtt_delta_ms", "duplicates",
+          "bounded_rtt_samples", "elapsed_s", "measurement", "reference", "reason"]
+
+
+def say(message):
+    print(message, flush=True)
+
+
+def cmd(*args, timeout=10):
+    return subprocess.run(args, env=ENV, text=True, stdout=subprocess.PIPE,
+                          stderr=subprocess.PIPE, timeout=timeout, check=False)
+
+
+def ip_json(*args):
+    p = cmd("ip", "-j", "-4", *args)
+    if p.returncode:
+        raise RuntimeError(p.stderr.strip() or "ip command failed")
+    return json.loads(p.stdout)
+
+
+def ipv4(text):
+    try:
+        ip = ipaddress.IPv4Address(text)
+        if ip.is_unspecified or ip.is_multicast or ip.is_loopback or ip == ipaddress.IPv4Address("255.255.255.255"):
+            raise ValueError("not a unicast remote IPv4 address")
+        return str(ip)
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(f"Invalid remote IPv4: {text}") from e
+
+
+def rates_arg(text):
+    try:
+        values = [int(x) for x in text.split(",")]
+        if not values or len(values) > 10 or len(set(values)) != len(values) or any(x < 1 or x > 50 for x in values):
+            raise ValueError
+        return values
+    except ValueError:
+        raise argparse.ArgumentTypeError("Use unique integer rates in 1..50 Hz (comma-separated).") from None
+
+
+def usb_id(path):
+    try:
+        resolved = path.resolve(strict=True)
+        for p in (resolved, *resolved.parents):
+            v, d = p / "idVendor", p / "idProduct"
+            if v.is_file() and d.is_file():
+                return v.read_text().strip().lower(), d.read_text().strip().lower()
+    except OSError:
+        pass
+    return None
+
+
+def ecm_interfaces():
+    out = []
+    for p in sorted(Path("/sys/class/net").glob("*")):
+        dev = p / "device"
+        driver = dev / "driver"
+        if usb_id(dev) == MODEM and driver.exists() and driver.resolve().name == "cdc_ether":
+            out.append(p.name)
+    return out
+
+
+def route(target):
+    rows = ip_json("route", "get", target)
+    if len(rows) != 1:
+        raise RuntimeError(f"Unexpected route result for {target}")
+    return rows[0]
+
+
+def route_key(r):
+    return tuple(r.get(k) for k in ("dev", "gateway", "prefsrc", "src"))
+
+
+def percentile(values, p):
+    """Linear interpolation (inclusive endpoints)."""
+    if not values:
+        return None
+    x = sorted(values)
+    pos = (len(x) - 1) * p
+    lo = math.floor(pos)
+    hi = math.ceil(pos)
+    return x[lo] + (x[hi] - x[lo]) * (pos - lo)
+
+
+def parse_ping(output):
+    replies = {}
+    duplicates = 0
+    bounded = 0
+    for line in output.splitlines():
+        m = REPLY.search(line)
+        if not m:
+            continue
+        seq, op, val = int(m[1]), m[2], float(m[3])
+        if seq in replies:
+            duplicates += 1
+            continue
+        # time<1 is an upper bound, not an exact RTT; preserve that fact in CSV.
+        replies[seq] = (val, op == "<")
+        bounded += op == "<"
+    total = TOTAL.search(output)
+    rtt = RTT.search(output)
+    return replies, duplicates, bounded, (
+        (int(total[1]), int(total[2])) if total else (None, None)
+    ), ([float(rtt[i]) for i in range(1, 5)] if rtt else None)
+
+
+def metrics(replies, tx, rx):
+    x = [v[0] for _, v in sorted(replies.items())]
+    seqs = sorted(replies)
+    delta = [abs(replies[b][0] - replies[a][0])
+             for a, b in zip(seqs, seqs[1:]) if b == a + 1]
+    return {
+        "loss_pct": 100 * (tx - rx) / tx if tx and rx is not None else None,
+        "min_ms": min(x) if x else None,
+        "mean_ms": statistics.mean(x) if x else None,
+        "median_ms": statistics.median(x) if x else None,
+        "p95_ms": percentile(x, .95),
+        "p99_ms": percentile(x, .99),
+        "max_ms": max(x) if x else None,
+        "mdev_ms": statistics.pstdev(x) if x else None,
+        "mean_abs_rtt_delta_ms": statistics.mean(delta) if delta else None,
+    }
+
+
+def reference(row, limits):
+    if row["measurement"] != "COMPLETE":
+        return "NOT_EVALUATED"
+    if not row["received"]:
+        return "OUTSIDE_REFERENCE"
+    checks = (("mean_ms", "mean"), ("max_ms", "max"),
+              ("mdev_ms", "mdev"), ("loss_pct", "loss"))
+    return ("WITHIN_REFERENCE" if all(row[k] <= limits[n] for k, n in checks)
+            else "OUTSIDE_REFERENCE")
+
+
+def write_json(path, obj):
+    path.write_text(json.dumps(obj, indent=2, allow_nan=False) + "\n")
+
+
+def empty_row(label, target, iface, hz, count):
+    row = dict.fromkeys(FIELDS)
+    row.update(label=label, target=target, interface=iface, rate_hz=hz,
+               requested_packets=count, measurement="INVALID", reference="NOT_EVALUATED")
+    return row
+
+
+def measure(out, label, target, iface, hz, duration, limits):
+    count = hz * duration
+    name = f"{label}-{hz}hz"
+    row = empty_row(label, target, iface, hz, count)
+    say(f"\n[TEST] {label}: {target} via {iface}, {hz} Hz, {count} packets")
+    try:
+        before = route(target)
+        if before.get("dev") != iface:
+            raise RuntimeError(f"Route mismatch: expected {iface}, got {before.get('dev')}")
+        if before.get("type") == "local" or iface == "lo":
+            raise RuntimeError("Target is local to this host; use a remote endpoint.")
+    except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as e:
+        row["reason"] = str(e)
+        say("[INVALID] " + row["reason"])
+        return row
+    args = ["ping", "-4", "-n", "-D", "-I", iface, "-i", f"{1/hz:.6f}",
+            "-c", str(count), "-W", "5", "-w", str(duration + 15), target]
+    start = time.monotonic()
+    began = dt.datetime.now(dt.timezone.utc).isoformat()
+    timed_out = False
+    try:
+        proc = cmd(*args, timeout=duration + 25)
+        stdout, stderr, rc = proc.stdout, proc.stderr, proc.returncode
+    except subprocess.TimeoutExpired as e:
+        def decode(x):
+            return x.decode(errors="replace") if isinstance(x, bytes) else (x or "")
+        stdout, stderr, rc = decode(e.stdout), decode(e.stderr), None
+        timed_out = True
+    except OSError as e:
+        stdout, stderr, rc = "", str(e), None
+    elapsed = time.monotonic() - start
+    (out / f"{name}.txt").write_text(stdout + "\n--- STDERR ---\n" + stderr)
+    replies, dup, bounded, (tx, rx), summary_rtt = parse_ping(stdout)
+    row.update(transmitted=tx, received=rx, duplicates=dup,
+               bounded_rtt_samples=bounded, elapsed_s=round(elapsed, 3))
+    errors = []
+    if timed_out:
+        errors.append("subprocess timeout")
+    if rc not in (0, 1):
+        errors.append(f"ping exit={rc}")
+    if tx != count:
+        errors.append("missing or incomplete transmit count")
+    if rx is None or rx != len(replies) or any(not 1 <= seq <= count for seq in replies):
+        errors.append("reply parser/summary mismatch")
+    if tx is not None and rx is not None and not 0 <= rx <= tx:
+        errors.append("invalid packet totals")
+    try:
+        after = route(target)
+        if route_key(after) != route_key(before):
+            errors.append("route changed between start/end")
+    except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as e:
+        after = None
+        errors.append("route verification failed: " + str(e))
+    if not errors:
+        row.update(metrics(replies, tx, rx))
+        row["measurement"] = "COMPLETE"
+        row["reference"] = reference(row, limits)
+    row["reason"] = "; ".join(errors)
+    with (out / f"{name}-packets.csv").open("w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["icmp_seq", "status", "rtt_ms", "rtt_is_upper_bound"])
+        # Missing sequences are only confirmed loss for a complete measurement.
+        for seq in range(1, count+1):
+            if seq in replies:
+                val, bound = replies[seq]
+                w.writerow([seq, "reply", val, int(bound)])
+            else:
+                w.writerow([seq, "no_reply" if not errors else "unknown", "", ""])
+    write_json(out / f"{name}-meta.json", {
+        "started_utc": began, "command": args, "route_before": before,
+        "route_after": after, "ping_exit": rc,
+        "ping_native_min_avg_max_mdev_ms": summary_rtt,
+        "summary": row,
+    })
+    if errors:
+        say("[INVALID] " + row["reason"])
+    else:
+        fmt = lambda v: "-" if v is None else f"{v:.3f}"
+        say(f"[COMPLETE] loss={fmt(row['loss_pct'])}% avg={fmt(row['mean_ms'])} ms "
+            f"P95={fmt(row['p95_ms'])} ms P99={fmt(row['p99_ms'])} ms "
+            f"max={fmt(row['max_ms'])} ms mdev={fmt(row['mdev_ms'])} ms")
+        say("[REFERENCE] " + row["reference"])
+    return row
+
+
+def self_test():
+    import unittest
+
+    class TestMetrics(unittest.TestCase):
+        def test_parse(self):
+            raw = ("[1.0] 64 bytes from 1.1.1.1: icmp_seq=1 ttl=50 time=10.0 ms\n"
+                   "[1.1] 64 bytes from 1.1.1.1: icmp_seq=1 ttl=50 time=11 ms (DUP!)\n"
+                   "[1.2] 64 bytes from 1.1.1.1: icmp_seq=3 ttl=50 time=30 ms\n"
+                   "3 packets transmitted, 2 received, +1 duplicates, 33.333% packet loss\n"
+                   "rtt min/avg/max/mdev = 10.000/17.000/30.000/9.000 ms")
+            replies, dup, bound, totals, native = parse_ping(raw)
+            self.assertEqual(totals, (3, 2))
+            self.assertEqual(dup, 1)
+            self.assertEqual(bound, 0)
+            self.assertEqual(native, [10., 17., 30., 9.])
+            row = metrics(replies, *totals)
+            self.assertAlmostEqual(row["loss_pct"], 100/3)
+            self.assertEqual(row["mean_ms"], 20)
+            self.assertEqual(row["mdev_ms"], 10)
+            self.assertEqual(row["p95_ms"], 29)
+            self.assertIsNone(row["mean_abs_rtt_delta_ms"])
+
+        def test_total_loss(self):
+            replies, _, _, totals, _ = parse_ping("10 packets transmitted, 0 received, 100% packet loss")
+            row = metrics(replies, *totals)
+            self.assertEqual(row["loss_pct"], 100)
+            self.assertIsNone(row["p99_ms"])
+
+        def test_bound_and_delta(self):
+            replies, _, bound, _, _ = parse_ping("icmp_seq=1 ttl=64 time<1 ms\nicmp_seq=2 ttl=64 time=3 ms")
+            self.assertEqual(bound, 1)
+            self.assertEqual(metrics(replies, 2, 2)["mean_abs_rtt_delta_ms"], 2)
+
+        def test_route_and_reference(self):
+            self.assertNotEqual(route_key({"dev": "wt0"}), route_key({"dev": "eth0"}))
+            row = dict(measurement="COMPLETE", received=1, mean_ms=90, max_ms=140,
+                       mdev_ms=15, loss_pct=0)
+            limits = dict(mean=100, max=150, mdev=20, loss=0)
+            self.assertEqual(reference(row, limits), "WITHIN_REFERENCE")
+            row["max_ms"] = 200
+            self.assertEqual(reference(row, limits), "OUTSIDE_REFERENCE")
+            row["measurement"] = "INVALID"
+            self.assertEqual(reference(row, limits), "NOT_EVALUATED")
+
+    result = unittest.TextTestRunner(verbosity=2).run(
+        unittest.defaultTestLoader.loadTestsFromTestCase(TestMetrics))
+    return 0 if result.wasSuccessful() else 1
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--version", action="version", version=VERSION)
+    p.add_argument("--self-test", action="store_true", help="offline parser/metric tests")
+    p.add_argument("--mode", choices=["all", "cellular", "netbird", "local"], default="all")
+    p.add_argument("--netbird", type=ipv4, metavar="PEER_IP", help="remote NetBird peer, not this device")
+    p.add_argument("--vpn-iface", default="wt0")
+    p.add_argument("--local", type=ipv4, metavar="REMOTE_IP", help="remote LAN/AP endpoint (use a client laptop to test the AP gateway)")
+    p.add_argument("--cell-iface", help="select among detected RM520N CDC-ECM interfaces")
+    p.add_argument("--internet", type=ipv4, default="1.1.1.1")
+    p.add_argument("--duration", type=int, default=60, help="nominal send duration per test, seconds (1..600)")
+    p.add_argument("--rates", type=rates_arg, default=[5, 10, 20, 50], help="NetBird rates in Hz")
+    p.add_argument("--baseline-rate", type=int, default=5, help="gateway/internet/local rate in Hz")
+    p.add_argument("--mean-limit", type=float, default=100)
+    p.add_argument("--max-limit", type=float, default=150)
+    p.add_argument("--mdev-limit", type=float, default=20)
+    p.add_argument("--loss-limit", type=float, default=0)
+    p.add_argument("--output", type=Path, default=Path("quality-results"))
+    a = p.parse_args()
+    if a.self_test:
+        return self_test()
+    if not 1 <= a.duration <= 600 or not 1 <= a.baseline_rate <= 50:
+        p.error("duration must be 1..600 s and baseline rate 1..50 Hz")
+    limits = dict(mean=a.mean_limit, max=a.max_limit, mdev=a.mdev_limit, loss=a.loss_limit)
+    if any(not math.isfinite(x) or x < 0 for x in limits.values()) or limits["loss"] > 100:
+        p.error("reference limits must be finite and nonnegative; loss <= 100")
+    if not all(shutil.which(x) for x in ("ping", "ip")):
+        p.error("Missing dependencies: install iputils-ping and iproute2.")
+    plan = []
+    skipped = []
+    if a.mode in ("all", "cellular"):
+        cells = ecm_interfaces()
+        iface = a.cell_iface or (cells[0] if len(cells) == 1 else None)
+        if iface not in cells:
+            skipped.append("Cellular: no unique RM520N cdc_ether interface; connect modem or use --cell-iface.")
+        else:
+            try:
+                defaults = ip_json("route", "show", "default", "dev", iface)
+                gateways = sorted({r["gateway"] for r in defaults if r.get("gateway")})
+                if len(gateways) == 1:
+                    plan.append(("ecm-gateway", gateways[0], iface, a.baseline_rate))
+                else:
+                    skipped.append("ECM gateway: no unique IPv4 default gateway.")
+            except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as e:
+                skipped.append("ECM gateway: " + str(e))
+            plan.append(("cellular-internet", a.internet, iface, a.baseline_rate))
+    if a.mode in ("all", "netbird"):
+        peer = a.netbird
+        if not peer and sys.stdin.isatty():
+            typed = input("Remote NetBird peer IPv4 (Enter to skip): ").strip()
+            if typed:
+                try:
+                    peer = ipv4(typed)
+                except argparse.ArgumentTypeError as e:
+                    p.error(str(e))
+        if peer:
+            plan.extend(("netbird", peer, a.vpn_iface, hz) for hz in a.rates)
+        else:
+            skipped.append("NetBird: no remote peer supplied.")
+    if a.mode == "local" or (a.mode == "all" and a.local):
+        if not a.local:
+            p.error("--mode local requires --local REMOTE_IP")
+        try:
+            iface = route(a.local).get("dev")
+            if not iface or iface == "lo":
+                raise RuntimeError("target is local to this host or has no usable route")
+            plan.append(("local", a.local, iface, a.baseline_rate))
+        except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as e:
+            skipped.append("Local: " + str(e))
+    for reason in skipped:
+        say("[SKIP] " + reason)
+    if not plan:
+        say("[FAIL] No runnable tests.")
+        return 2
+    if os.geteuid() != 0 and any(hz > 5 for _, _, _, hz in plan):
+        p.error("Run with sudo for high-rate ping tests (>5 Hz).")
+    a.output.mkdir(parents=True, exist_ok=True)
+    out = Path(tempfile.mkdtemp(prefix=dt.datetime.now().strftime("%Y%m%d-%H%M%S-"), dir=a.output))
+    say(f"CTUAV Network Quality v{VERSION} | output: {out}")
+    say("Sequential ICMP tests only; do not run during flight or critical operations.")
+    say("Reference limits are configurable engineering indicators, NOT flight acceptance criteria.")
+    rows = []
+    interrupted = False
+    try:
+        for label, target, iface, hz in plan:
+            rows.append(measure(out, label, target, iface, hz, a.duration, limits))
+            # Keep completed results if the next test is interrupted.
+            with (out / "summary.csv").open("w", newline="") as f:
+                w = csv.DictWriter(f, fieldnames=FIELDS)
+                w.writeheader()
+                w.writerows(rows)
+    except KeyboardInterrupt:
+        interrupted = True
+        say("\n[WARN] Interrupted; keeping previously completed tests.")
+    finally:
+        write_json(out / "summary.json", {
+            "tool_version": VERSION, "reference_limits": limits,
+            "nominal_duration_s": a.duration, "interrupted": interrupted,
+            "planned_tests": len(plan), "skipped": skipped, "tests": rows,
+            "notes": ["ICMP RTT only; no one-way latency, throughput or video measurement.",
+                      "mdev is population standard deviation of unique received RTTs.",
+                      "P95/P99 use linear interpolation; missing replies excluded.",
+                      "RTT upper bounds are counted using their displayed bound.",
+                      "RTT delta uses adjacent sequence numbers only; not RFC jitter.",
+                      "Route snapshots cannot prove the route stayed unchanged throughout.",
+                      "NetBird interface binding does not prove the underlying transport is cellular.",
+                      "Reference flags are not safety or flight qualification."],
+        })
+    say(f"\nResults: {out}/summary.csv and summary.json")
+    say("Raw ping logs and per-packet CSV files are retained locally. Redact IPs before sharing.")
+    return 130 if interrupted else (2 if skipped or any(r["measurement"] != "COMPLETE" for r in rows) else 0)
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as exc:
+        say(f"[FAIL] {exc}")
+        sys.exit(2)

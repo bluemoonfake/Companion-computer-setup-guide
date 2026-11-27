@@ -69,8 +69,31 @@ To resume after reviewing configuration: sudo systemctl enable --now ctuav-netwo
 
 For manual setup, measured 5G results, NetBird, driver troubleshooting and recovery, see [RM520N-GL detailed setup](2nd_dougle_4g_setup.md). The other legacy documents are retained for reference; do not run the legacy hotspot or 4G reset scripts together with this watchdog.
 
+## Network quality benchmark
+
+The standalone `quality` command measures ICMP round-trip time and packet loss without changing NetworkManager, NetBird, modem settings or the watchdog.
+
+~~~bash
+sudo ./quality --self-test
+sudo ./quality
+# Or supply the remote NetBird peer explicitly:
+sudo ./quality --netbird PEER_IPV4
+# Short smoke test:
+sudo ./quality --mode netbird --netbird PEER_IPV4 --duration 10 --rates 5,10
+# Cellular only:
+sudo ./quality --mode cellular
+# From a Linux laptop connected to the Hotspot (not on the Orange Pi itself):
+./quality --mode local --local 192.168.50.1
+~~~
+
+Replace PEER_IPV4 with a reachable remote NetBird peer address, not the device's own IP. If omitted, the interactive benchmark asks for it. Default tests are ECM gateway and direct Internet (5 Hz), then NetBird at 5/10/20/50 Hz, sequentially for 60 seconds nominal send duration each. Each test checks its IPv4 route and binds ping to the expected interface. A NetBird route does not prove its underlying transport uses 5G; verify the host uplink separately.
+
+Results are saved in a private timestamped directory under `quality-results/` (root-owned when run with sudo): raw ping logs, per-packet CSV, summary CSV and JSON. Statistics include loss, min/mean/median/P95/P99/max RTT, population mdev and mean absolute RTT change between adjacent received sequence numbers. Configurable reference defaults: mean <=100 ms, max <=150 ms, mdev <=20 ms, loss <=0%; these are engineering indicators, not flight acceptance criteria. Use `./quality --help` to change duration, rates, output path and limits. A complete measurement can be outside the reference; invalid or skipped measurements exit 2, while a completed benchmark with poor performance is still a valid measurement. Avoid tests during flight.
+
+For a detailed procedure and limitations see [Network quality benchmark](docs/NETWORK_QUALITY.md).
+
 ## Validation
 
-Version 0.1.1 is an initial installer implementation, not a hardware-qualified release. The earlier manual ECM/AP/STA configurations were tested on Orange Pi 6. The new executable, automatic AT path, fallback AP and end-to-end installation require on-device validation. Do not use it as a safety-critical control link.
+Version 0.1.1 is an initial installer implementation, not a hardware-qualified release. The earlier manual ECM/AP/STA configurations were tested on Orange Pi 6. On-device v0.1.0 validation confirmed ECM, existing Station profile reuse, Hotspot activation after installing dnsmasq-base, and active/enabled watchdog. Automated dependency installation in v0.1.1, automatic AT path, bidirectional switching, fallback AP, reboot and the new quality tool still require validation. Do not use it as a safety-critical control link.
 
 CLI workflow inspired by [MAVLink Anywhere](https://github.com/alireza787b/mavlink-anywhere); this is an independent implementation, not a dependency on that project.
